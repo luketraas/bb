@@ -10,7 +10,7 @@ import {
 } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import { Profiler, type ProfilerOnRenderCallback, type ReactNode } from "react";
 import { createStore, Provider } from "jotai";
 import type { ThreadListEntry } from "@bb/domain";
 import type { PluginComposerThreadRowStatus } from "@get-bb/plugin-sdk";
@@ -58,7 +58,9 @@ import { sdk } from "@/lib/sdk";
 import { makeThreadListEntry as makeThreadListEntryFixture } from "@bb/test-helpers/domain-fixtures";
 
 vi.mock("@/components/thread/ThreadActionsMenu", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/components/thread/ThreadActionsMenu")>()),
+  ...(await importOriginal<
+    typeof import("@/components/thread/ThreadActionsMenu")
+  >()),
   ThreadActionsContextMenu: ({ children }: { children: ReactNode }) => (
     <>{children}</>
   ),
@@ -265,19 +267,24 @@ describe("ThreadRow", () => {
     let rejectRestore!: (error: Error) => void;
     const mutation = client.getMutationCache().build(client, {
       mutationKey: ["unarchive-thread"],
-      mutationFn: (_input: { id: string }) => new Promise<void>((_resolve, reject) => {
-        rejectRestore = reject;
-      }),
+      mutationFn: (_input: { id: string }) =>
+        new Promise<void>((_resolve, reject) => {
+          rejectRestore = reject;
+        }),
     });
     render(
       <QueryClientProvider client={client}>
         <ThreadRowTestHarness thread={thread} />
       </QueryClientProvider>,
     );
-    const restore = screen.getByRole<HTMLButtonElement>("button", { name: "Unarchive thread" });
+    const restore = screen.getByRole<HTMLButtonElement>("button", {
+      name: "Unarchive thread",
+    });
     let completion: Promise<unknown>;
     act(() => {
-      completion = mutation.execute({ id: "another-thread" }).catch(() => undefined);
+      completion = mutation
+        .execute({ id: "another-thread" })
+        .catch(() => undefined);
     });
     await waitFor(() => expect(rejectRestore).toBeTypeOf("function"));
     expect(restore.disabled).toBe(false);
@@ -463,6 +470,63 @@ describe("ThreadRow", () => {
       ).toBe(`Thread — open in split; ${expectedStatus}`);
     },
   );
+
+  it("does not re-render a row whose split state is unchanged when focus moves", () => {
+    const splitThread = createThread({ id: "thr_split" });
+    const plainThread = createThread({ id: "thr_plain" });
+    const store = createStore();
+    store.set(splitLayoutAtom, {
+      focusedPaneId: "pane-thread",
+      root: {
+        type: "split",
+        dir: "row",
+        sizes: [0.5, 0.5],
+        children: [
+          {
+            type: "pane",
+            paneId: "pane-thread",
+            content: {
+              kind: "thread",
+              projectId: splitThread.projectId,
+              threadId: splitThread.id,
+            },
+          },
+          {
+            type: "pane",
+            paneId: "pane-compose",
+            content: { kind: "new-thread" },
+          },
+        ],
+      },
+    });
+    const commits = new Map<string, number>();
+    const onRender: ProfilerOnRenderCallback = (id) => {
+      commits.set(id, (commits.get(id) ?? 0) + 1);
+    };
+    render(
+      <Provider store={store}>
+        <Profiler id="split-row" onRender={onRender}>
+          <ThreadRowTestHarness thread={splitThread} />
+        </Profiler>
+        <Profiler id="plain-row" onRender={onRender}>
+          <ThreadRowTestHarness thread={plainThread} />
+        </Profiler>
+      </Provider>,
+    );
+    const settledPlain = commits.get("plain-row") ?? 0;
+    const settledSplit = commits.get("split-row") ?? 0;
+
+    act(() => {
+      const layout = store.get(splitLayoutAtom);
+      store.set(
+        splitLayoutAtom,
+        layout === null ? null : { ...layout, focusedPaneId: "pane-compose" },
+      );
+    });
+
+    expect(commits.get("plain-row") ?? 0).toBe(settledPlain);
+    expect(commits.get("split-row") ?? 0).toBeGreaterThan(settledSplit);
+  });
 
   it("puts the draft icon in the trailing status slot", () => {
     const { container } = renderThreadRow({

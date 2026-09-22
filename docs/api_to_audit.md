@@ -2573,7 +2573,10 @@ reimplementing it, and `indicatorLabel` carries the matching accessible string.
    host's engage threshold; `splitProps` staying an open object is the right
    forward-compatible shape, or it should narrow to a named handler; and
    exposing the full `panes` array does not leak more layout state than a row
-   needs.
+   needs. **Testing fake (2026-09-22):** the testing runtime's
+   `experimental_useSidebarThreadSplit` now derives `layout` from the harness's
+   `sidebarSplitLayout` like the host, where it previously always returned
+   `null`.
 
 ## `app.slots.experimental_threadHeaderAction` (`@get-bb/plugin-sdk/app`)
 

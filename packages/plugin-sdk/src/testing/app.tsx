@@ -992,18 +992,35 @@ const testPluginSdkApp = {
   },
   experimental_useSidebarThreadSplit(threadId): PluginSidebarThreadSplit {
     const env = useSlotEnv("experimental_useSidebarThreadSplit");
-    return useMemo(
-      () => ({
+    return useMemo(() => {
+      const known = env.sidebarThreads.threads.some(
+        (thread) => thread.id === threadId,
+      );
+      if (!known) {
+        return { splitProps: {}, isAvailable: false, layout: null };
+      }
+      const panes = env.sidebarSplitLayout?.panes ?? [];
+      const myPane = panes.find((pane) => pane.threadId === threadId);
+      return {
         splitProps: {
           onPointerDown: () => {
             env.sidebarActionCalls.push({ method: "open", threadId });
           },
         },
         isAvailable: true,
-        layout: null,
-      }),
-      [env, threadId],
-    );
+        layout:
+          myPane === undefined
+            ? null
+            : {
+                panes: panes.map((pane) => ({
+                  paneId: pane.paneId,
+                  rect: pane.rect,
+                  isMe: pane.paneId === myPane.paneId,
+                  isFocused: pane.isFocused,
+                })),
+              },
+      };
+    }, [env, threadId]);
   },
   useSidebarThreadDraft(threadId): PluginSidebarThreadDraftState {
     const env = useSlotEnv("useSidebarThreadDraft");

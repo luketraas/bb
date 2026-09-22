@@ -1,7 +1,6 @@
 import {
   memo,
   useCallback,
-  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -30,11 +29,9 @@ import {
   experimental_useSidebarThreadActions,
   experimental_useSidebarThreadSplit,
   ThreadTitle,
-  useSidebarSplitLayout,
   useSidebarThreadDraft,
   useSidebarThreadRowStatus,
   useSidebarThreadShortcut,
-  type PluginSidebarSplitPane,
   type PluginSidebarThreadRowStatus,
 } from "@get-bb/plugin-sdk/app";
 import type { SidebarThread } from "../model/sidebar-thread.js";
@@ -278,22 +275,6 @@ function ThreadRestoreStatusAction({ thread }: { thread: SidebarThread }) {
   );
 }
 
-function useThreadSplitMiniMap(
-  threadId: string,
-): readonly PluginSidebarSplitPane[] | null {
-  const layout = useSidebarSplitLayout();
-  return useMemo(() => {
-    if (layout === null) return null;
-    const slots = layout.panes.map<PluginSidebarSplitPane>((pane) => ({
-      paneId: pane.paneId,
-      rect: pane.rect,
-      isMe: pane.threadId === threadId,
-      isFocused: pane.isFocused,
-    }));
-    return slots.some((slot) => slot.isMe) ? slots : null;
-  }, [layout, threadId]);
-}
-
 function ThreadRowComponent({
   projectId,
   thread,
@@ -343,9 +324,9 @@ function ThreadRowComponent({
     },
     [startEditing],
   );
-  const miniMap = useThreadSplitMiniMap(thread.id);
-  const isOpenInSplit = miniMap !== null;
   const split = experimental_useSidebarThreadSplit(thread.id);
+  const miniMap = split.layout?.panes ?? null;
+  const isOpenInSplit = miniMap !== null;
   const onSplitDragPointerDown = split.splitProps.onPointerDown;
   const splitAvailable = split.isAvailable;
   const openInSplit = useCallback(() => {
