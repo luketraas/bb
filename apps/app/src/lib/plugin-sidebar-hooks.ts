@@ -1,6 +1,7 @@
 import {
   createContext,
   createElement,
+  use,
   useCallback,
   useContext,
   useEffect,
@@ -250,20 +251,48 @@ interface SidebarThreadRowData {
   actions: PluginSidebarThreadActions;
 }
 
-interface SidebarThreadListData {
+interface SidebarThreadsData {
   threadsState: PluginSidebarThreadsState;
+  requestArchived(): () => void;
+}
+
+interface SidebarThreadArchiveData {
   getThreadsState(
     active: boolean,
     includeArchived: boolean,
   ): PluginSidebarThreadsState;
-  requestArchived(): () => void;
 }
 
 const SidebarThreadRowDataContext = createContext<SidebarThreadRowData | null>(
   null,
 );
-const SidebarThreadListDataContext =
-  createContext<SidebarThreadListData | null>(null);
+const SidebarThreadsDataContext = createContext<SidebarThreadsData | null>(null);
+const SidebarThreadArchiveDataContext =
+  createContext<SidebarThreadArchiveData | null>(null);
+
+const threadsStateVariants = new WeakMap<
+  object,
+  Map<string, PluginSidebarThreadsState>
+>();
+
+function readThreadsStateVariant(
+  owner: object,
+  active: boolean,
+  includeArchived: boolean,
+  build: () => PluginSidebarThreadsState,
+): PluginSidebarThreadsState {
+  let variants = threadsStateVariants.get(owner);
+  if (variants === undefined) {
+    variants = new Map();
+    threadsStateVariants.set(owner, variants);
+  }
+  const key = `${active ? "active" : ""}|${includeArchived ? "archived" : ""}`;
+  const cached = variants.get(key);
+  if (cached !== undefined) return cached;
+  const state = build();
+  variants.set(key, state);
+  return state;
+}
 
 export function SidebarThreadDataProvider({
   children,
@@ -335,29 +364,36 @@ export function SidebarThreadDataProvider({
     [hostNamesById, query.data, query.isError, titleResources],
   );
   const getThreadsState = useCallback(
-    (active: boolean, includeArchived: boolean) => {
+    function getThreadsState(active: boolean, includeArchived: boolean) {
       if (active && !includeArchived) return threadsState;
-      const effectiveArchiveState =
-        archiveState ??
-        (includeArchived
-          ? {
-              status: "loading" as const,
-              hasNextPage: archivedHasNextPage,
-              isFetchingNextPage: archivedIsFetchingNextPage,
-              isFetchNextPageError: archivedIsFetchNextPageError,
-              fetchNextPage,
-            }
-          : null);
-      return buildSidebarThreadsState({
-        data: query.data,
-        isError: query.isError,
+      return readThreadsStateVariant(
+        getThreadsState,
         active,
         includeArchived,
-        archivedData,
-        archiveState: effectiveArchiveState,
-        hostNamesById,
-        titleResources,
-      });
+        () => {
+          const effectiveArchiveState =
+            archiveState ??
+            (includeArchived
+              ? {
+                  status: "loading" as const,
+                  hasNextPage: archivedHasNextPage,
+                  isFetchingNextPage: archivedIsFetchingNextPage,
+                  isFetchNextPageError: archivedIsFetchNextPageError,
+                  fetchNextPage,
+                }
+              : null);
+          return buildSidebarThreadsState({
+            data: query.data,
+            isError: query.isError,
+            active,
+            includeArchived,
+            archivedData,
+            archiveState: effectiveArchiveState,
+            hostNamesById,
+            titleResources,
+          });
+        },
+      );
     },
     [
       archiveState,
@@ -388,18 +424,26 @@ export function SidebarThreadDataProvider({
     () => ({ actions, entriesById }),
     [actions, entriesById],
   );
-  const listValue = useMemo<SidebarThreadListData>(
-    () => ({ getThreadsState, requestArchived, threadsState }),
-    [getThreadsState, requestArchived, threadsState],
+  const threadsValue = useMemo<SidebarThreadsData>(
+    () => ({ requestArchived, threadsState }),
+    [requestArchived, threadsState],
+  );
+  const archiveValue = useMemo<SidebarThreadArchiveData>(
+    () => ({ getThreadsState }),
+    [getThreadsState],
   );
 
   return createElement(
-    SidebarThreadListDataContext.Provider,
-    { value: listValue },
+    SidebarThreadArchiveDataContext.Provider,
+    { value: archiveValue },
     createElement(
-      SidebarThreadRowDataContext.Provider,
-      { value: rowValue },
-      children,
+      SidebarThreadsDataContext.Provider,
+      { value: threadsValue },
+      createElement(
+        SidebarThreadRowDataContext.Provider,
+        { value: rowValue },
+        children,
+      ),
     ),
   );
 }
@@ -410,19 +454,21 @@ export function useSidebarThreads(
   const lifecycles = options?.experimental_lifecycles;
   const active = !lifecycles?.length || lifecycles.includes("active");
   const includeArchived = lifecycles?.includes("archived") ?? false;
-  const listData = useContext(SidebarThreadListDataContext);
-  const requestArchived = listData?.requestArchived;
+  const threadsData = useContext(SidebarThreadsDataContext);
+  const requestArchived = threadsData?.requestArchived;
   useEffect(() => {
     if (!includeArchived || requestArchived === undefined) return;
     return requestArchived();
   }, [includeArchived, requestArchived]);
-  const providedState = useMemo(
-    () =>
-      listData === null
-        ? null
-        : listData.getThreadsState(active, includeArchived),
-    [active, includeArchived, listData],
-  );
+  const archiveData =
+    includeArchived && threadsData !== null
+      ? use(SidebarThreadArchiveDataContext)
+      : null;
+  const providedState = useMemo(() => {
+    if (threadsData === null) return null;
+    if (archiveData === null) return threadsData.threadsState;
+    return archiveData.getThreadsState(active, includeArchived);
+  }, [active, archiveData, includeArchived, threadsData]);
   if (providedState !== null) return providedState;
   // oxlint-disable-next-line react/rules-of-hooks
   return useComputedSidebarThreads(options);

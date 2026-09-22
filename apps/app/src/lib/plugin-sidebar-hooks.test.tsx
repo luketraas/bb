@@ -819,6 +819,74 @@ describe("SidebarThreadDataProvider", () => {
     expect(renders.row).toBe(0);
   });
 
+  it("does not re-render a default consumer when archive paging flags change", () => {
+    const renders = { list: 0, defaultConsumer: 0 };
+    const DefaultConsumer = memo(function DefaultConsumer({
+      onRender,
+    }: {
+      onRender: () => void;
+    }) {
+      useSidebarThreads();
+      useEffect(() => {
+        onRender();
+      });
+      return null;
+    });
+    function ListConsumer({ onRender }: { onRender: () => void }) {
+      useSidebarThreads({ experimental_lifecycles: ["archived"] });
+      useEffect(() => {
+        onRender();
+      });
+      return null;
+    }
+    state.data = payload([
+      makeThreadListEntry({ id: "thr_1", projectId: "proj_app" }),
+    ]);
+    archiveQuery.data = { pages: [[]] };
+    const onListRender = () => {
+      renders.list += 1;
+    };
+    const onDefaultRender = () => {
+      renders.defaultConsumer += 1;
+    };
+    const tree = () => (
+      <SidebarThreadDataProvider>
+        <ListConsumer onRender={onListRender} />
+        <DefaultConsumer onRender={onDefaultRender} />
+      </SidebarThreadDataProvider>
+    );
+    const view = render(tree());
+    renders.list = 0;
+    renders.defaultConsumer = 0;
+
+    archiveQuery.isFetchingNextPage = true;
+    view.rerender(tree());
+
+    expect(renders.list).toBeGreaterThan(0);
+    expect(renders.defaultConsumer).toBe(0);
+  });
+
+  it("shares one state build across consumers with the same lifecycles", () => {
+    state.data = payload([]);
+    archiveQuery.data = { pages: [[]] };
+    const seen: {
+      first: ReturnType<typeof useSidebarThreads>[];
+      second: ReturnType<typeof useSidebarThreads>[];
+    } = { first: [], second: [] };
+
+    render(
+      <SidebarThreadDataProvider>
+        <ArchivedConsumer onState={(state) => seen.first.push(state)} />
+        <ArchivedConsumer onState={(state) => seen.second.push(state)} />
+      </SidebarThreadDataProvider>,
+    );
+
+    const first = seen.first[seen.first.length - 1];
+    const second = seen.second[seen.second.length - 1];
+    expect(first).toBeDefined();
+    expect(first).toBe(second);
+  });
+
   it("keeps an outside fallback consumer correct beside a mounted provider", () => {
     const threads = [
       makeThreadListEntry({ id: "thr_1", projectId: "proj_app" }),
