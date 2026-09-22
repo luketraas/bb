@@ -41,6 +41,7 @@ import {
   useIndexedAppCommandHandlers,
 } from "@/components/commands/AppCommandProvider";
 import { useRouteState } from "@/hooks/useRouteState";
+import { SidebarThreadDataProvider } from "@/lib/plugin-sidebar-hooks";
 import { SidebarNavigationRegion } from "./SidebarNavigationRegion";
 
 const NEW_THREAD_PANE_CONTENT = { kind: "new-thread" } as const;
@@ -268,18 +269,20 @@ export function AppSidebar({
 
   return (
     <SidebarThreadShortcutKeysContext.Provider value={threadShortcutKeysById}>
-      {mobileHosted ? (
-        <div
-          ref={sidebarRef}
-          data-testid="app-sidebar-body"
-          hidden={mobileHosted.hidden}
-          className="flex min-h-0 flex-1 flex-col"
-        >
-          {body}
-        </div>
-      ) : (
-        <Sidebar ref={sidebarRef}>{body}</Sidebar>
-      )}
+      <SidebarThreadDataProvider>
+        {mobileHosted ? (
+          <div
+            ref={sidebarRef}
+            data-testid="app-sidebar-body"
+            hidden={mobileHosted.hidden}
+            className="flex min-h-0 flex-1 flex-col"
+          >
+            {body}
+          </div>
+        ) : (
+          <Sidebar ref={sidebarRef}>{body}</Sidebar>
+        )}
+      </SidebarThreadDataProvider>
     </SidebarThreadShortcutKeysContext.Provider>
   );
 }

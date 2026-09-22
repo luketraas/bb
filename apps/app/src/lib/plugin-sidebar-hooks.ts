@@ -1,10 +1,20 @@
-import { useCallback, useMemo } from "react";
+import {
+  createContext,
+  createElement,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import { useStore } from "jotai";
 import {
   PERSONAL_PROJECT_ID,
   type Host,
   type ThreadListEntry,
 } from "@bb/domain";
+import type { SidebarBootstrapResponse } from "@bb/server-contract";
 import { useIsCompactViewport } from "@bb/shared-ui/hooks/use-compact-viewport";
 import type {
   PluginSdkApp,
@@ -105,7 +115,68 @@ function toPluginSidebarThreadCached(
   return thread;
 }
 
-export function useSidebarThreads(
+interface SidebarThreadsStateInput {
+  data: SidebarBootstrapResponse | undefined;
+  isError: boolean;
+  active: boolean;
+  includeArchived: boolean;
+  archivedData: ReturnType<typeof useArchivedThreads>["data"];
+  archiveState: PluginSidebarThreadsState["experimental_archived"];
+  hostNamesById: ReadonlyMap<string, string>;
+  titleResources: ThreadTitleMentionResources;
+}
+
+function buildSidebarThreadsState({
+  data,
+  isError,
+  active,
+  includeArchived,
+  archivedData,
+  archiveState,
+  hostNamesById,
+  titleResources,
+}: SidebarThreadsStateInput): PluginSidebarThreadsState {
+  if (data === undefined) {
+    return {
+      experimental_archived: archiveState,
+      status: isError ? "error" : "loading",
+      threads: EMPTY_THREADS,
+      projects: EMPTY_PROJECTS,
+      sections: EMPTY_SECTIONS,
+    };
+  }
+  const allProjects = [...data.projects, data.personalProject];
+  const selected = new Map<string, ThreadListEntry>();
+  if (includeArchived) {
+    for (const thread of archivedData?.pages.flat() ?? []) {
+      if (thread.archivedAt !== null) selected.set(thread.id, thread);
+    }
+  }
+  if (active) {
+    for (const project of allProjects) {
+      for (const thread of project.threads) {
+        if (thread.archivedAt === null) selected.set(thread.id, thread);
+      }
+    }
+  }
+  return {
+    experimental_archived: archiveState,
+    status: !active && archiveState !== null ? archiveState.status : "ready",
+    threads: [...selected.values()].map((thread) =>
+      toPluginSidebarThreadCached(thread, hostNamesById, titleResources),
+    ),
+    projects: allProjects.map((project) => ({
+      id: project.id,
+      name: project.name,
+      isPersonal: project.id === PERSONAL_PROJECT_ID,
+      href: getProjectComposeRoutePath(project.id),
+      settingsHref: getSettingsProjectRoutePath(project.id),
+    })),
+    sections: data.sections,
+  };
+}
+
+function useComputedSidebarThreads(
   options?: Parameters<PluginSdkApp["experimental_useSidebarThreads"]>[0],
 ): PluginSidebarThreadsState {
   const lifecycles = options?.experimental_lifecycles;
@@ -145,60 +216,216 @@ export function useSidebarThreads(
     ],
   );
   const query = useSidebarNavigation();
-  const data = query.data;
   const { data: hosts } = useHosts();
   const hostNamesById = hostNamesFor(hosts);
   const titleResources = useThreadTitleMentionResources();
 
-  return useMemo<PluginSidebarThreadsState>(() => {
-    if (data === undefined) {
-      return {
-        experimental_archived: archiveState,
-        status: query.isError ? "error" : "loading",
-        threads: EMPTY_THREADS,
-        projects: EMPTY_PROJECTS,
-        sections: EMPTY_SECTIONS,
-      };
-    }
-    const allProjects = [...data.projects, data.personalProject];
-    const selected = new Map<string, ThreadListEntry>();
-    if (includeArchived) {
-      for (const thread of archived.data?.pages.flat() ?? []) {
-        if (thread.archivedAt !== null) selected.set(thread.id, thread);
-      }
-    }
-    if (active) {
-      for (const project of allProjects) {
-        for (const thread of project.threads) {
-          if (thread.archivedAt === null) selected.set(thread.id, thread);
-        }
-      }
-    }
-    return {
-      experimental_archived: archiveState,
-      status: !active && archiveState !== null ? archiveState.status : "ready",
-      threads: [...selected.values()].map((thread) =>
-        toPluginSidebarThreadCached(thread, hostNamesById, titleResources),
-      ),
-      projects: allProjects.map((project) => ({
-        id: project.id,
-        name: project.name,
-        isPersonal: project.id === PERSONAL_PROJECT_ID,
-        href: getProjectComposeRoutePath(project.id),
-        settingsHref: getSettingsProjectRoutePath(project.id),
-      })),
-      sections: data.sections,
+  return useMemo(
+    () =>
+      buildSidebarThreadsState({
+        data: query.data,
+        isError: query.isError,
+        active,
+        includeArchived,
+        archivedData: archived.data,
+        archiveState,
+        hostNamesById,
+        titleResources,
+      }),
+    [
+      active,
+      archiveState,
+      archived.data,
+      hostNamesById,
+      includeArchived,
+      query.data,
+      query.isError,
+      titleResources,
+    ],
+  );
+}
+
+interface SidebarThreadRowData {
+  entriesById: ReadonlyMap<string, ThreadListEntry>;
+  actions: PluginSidebarThreadActions;
+}
+
+interface SidebarThreadListData {
+  threadsState: PluginSidebarThreadsState;
+  getThreadsState(
+    active: boolean,
+    includeArchived: boolean,
+  ): PluginSidebarThreadsState;
+  requestArchived(): () => void;
+}
+
+const SidebarThreadRowDataContext = createContext<SidebarThreadRowData | null>(
+  null,
+);
+const SidebarThreadListDataContext =
+  createContext<SidebarThreadListData | null>(null);
+
+export function SidebarThreadDataProvider({
+  children,
+}: {
+  children: ReactNode;
+}) {
+  const [archivedConsumerCount, setArchivedConsumerCount] = useState(0);
+  const archivedEnabled = archivedConsumerCount > 0;
+  const query = useSidebarNavigation();
+  const archived = useArchivedThreads({}, { enabled: archivedEnabled });
+  const { data: hosts } = useHosts();
+  const hostNamesById = hostNamesFor(hosts);
+  const titleResources = useThreadTitleMentionResources();
+
+  const archivedData = archived.data;
+  const archivedIsLoadingError = archived.isLoadingError;
+  const archivedHasNextPage = archived.hasNextPage;
+  const archivedIsFetchingNextPage = archived.isFetchingNextPage;
+  const archivedIsFetchNextPageError = archived.isFetchNextPageError;
+  const fetchArchivedPage = archived.fetchNextPage;
+
+  const entriesById = useMemo(
+    () => mergeSidebarThreadEntries(query.data, archivedData),
+    [archivedData, query.data],
+  );
+  const fetchNextPage = useCallback(async () => {
+    await fetchArchivedPage();
+  }, [fetchArchivedPage]);
+  const archiveState = useMemo<
+    PluginSidebarThreadsState["experimental_archived"]
+  >(
+    () =>
+      archivedEnabled || archivedData !== undefined
+        ? {
+            status:
+              archivedData !== undefined
+                ? "ready"
+                : archivedIsLoadingError
+                  ? "error"
+                  : "loading",
+            hasNextPage: archivedHasNextPage,
+            isFetchingNextPage: archivedIsFetchingNextPage,
+            isFetchNextPageError: archivedIsFetchNextPageError,
+            fetchNextPage,
+          }
+        : null,
+    [
+      archivedData,
+      archivedEnabled,
+      archivedHasNextPage,
+      archivedIsFetchingNextPage,
+      archivedIsFetchNextPageError,
+      archivedIsLoadingError,
+      fetchNextPage,
+    ],
+  );
+  const threadsState = useMemo(
+    () =>
+      buildSidebarThreadsState({
+        data: query.data,
+        isError: query.isError,
+        active: true,
+        includeArchived: false,
+        archivedData: undefined,
+        archiveState: null,
+        hostNamesById,
+        titleResources,
+      }),
+    [hostNamesById, query.data, query.isError, titleResources],
+  );
+  const getThreadsState = useCallback(
+    (active: boolean, includeArchived: boolean) => {
+      if (active && !includeArchived) return threadsState;
+      const effectiveArchiveState =
+        archiveState ??
+        (includeArchived
+          ? {
+              status: "loading" as const,
+              hasNextPage: archivedHasNextPage,
+              isFetchingNextPage: archivedIsFetchingNextPage,
+              isFetchNextPageError: archivedIsFetchNextPageError,
+              fetchNextPage,
+            }
+          : null);
+      return buildSidebarThreadsState({
+        data: query.data,
+        isError: query.isError,
+        active,
+        includeArchived,
+        archivedData,
+        archiveState: effectiveArchiveState,
+        hostNamesById,
+        titleResources,
+      });
+    },
+    [
+      archiveState,
+      archivedData,
+      archivedHasNextPage,
+      archivedIsFetchNextPageError,
+      archivedIsFetchingNextPage,
+      fetchNextPage,
+      hostNamesById,
+      query.data,
+      query.isError,
+      threadsState,
+      titleResources,
+    ],
+  );
+  const requestArchived = useCallback(() => {
+    setArchivedConsumerCount((count) => count + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      setArchivedConsumerCount((count) => Math.max(0, count - 1));
     };
-  }, [
-    data,
-    hostNamesById,
-    query.isError,
-    titleResources,
-    active,
-    includeArchived,
-    archived.data,
-    archiveState,
-  ]);
+  }, []);
+  const actions = useSidebarThreadActionsFor(entriesById);
+
+  const rowValue = useMemo<SidebarThreadRowData>(
+    () => ({ actions, entriesById }),
+    [actions, entriesById],
+  );
+  const listValue = useMemo<SidebarThreadListData>(
+    () => ({ getThreadsState, requestArchived, threadsState }),
+    [getThreadsState, requestArchived, threadsState],
+  );
+
+  return createElement(
+    SidebarThreadListDataContext.Provider,
+    { value: listValue },
+    createElement(
+      SidebarThreadRowDataContext.Provider,
+      { value: rowValue },
+      children,
+    ),
+  );
+}
+
+export function useSidebarThreads(
+  options?: Parameters<PluginSdkApp["experimental_useSidebarThreads"]>[0],
+): PluginSidebarThreadsState {
+  const lifecycles = options?.experimental_lifecycles;
+  const active = !lifecycles?.length || lifecycles.includes("active");
+  const includeArchived = lifecycles?.includes("archived") ?? false;
+  const listData = useContext(SidebarThreadListDataContext);
+  const requestArchived = listData?.requestArchived;
+  useEffect(() => {
+    if (!includeArchived || requestArchived === undefined) return;
+    return requestArchived();
+  }, [includeArchived, requestArchived]);
+  const providedState = useMemo(
+    () =>
+      listData === null
+        ? null
+        : listData.getThreadsState(active, includeArchived),
+    [active, includeArchived, listData],
+  );
+  if (providedState !== null) return providedState;
+  // oxlint-disable-next-line react/rules-of-hooks
+  return useComputedSidebarThreads(options);
 }
 
 const threadEntryMapByPayload = new WeakMap<
@@ -228,28 +455,43 @@ const archivedEntryMaps = new WeakMap<
   >
 >();
 
-function useThreadEntryMap(): ReadonlyMap<string, ThreadListEntry> {
+function mergeSidebarThreadEntries(
+  data: ReturnType<typeof useSidebarNavigation>["data"],
+  archivedData: ReturnType<typeof useArchivedThreads>["data"],
+): ReadonlyMap<string, ThreadListEntry> {
+  const active = threadEntryMapFor(data);
+  if (archivedData === undefined) return active;
+  let maps = archivedEntryMaps.get(archivedData);
+  if (maps === undefined) {
+    maps = new WeakMap();
+    archivedEntryMaps.set(archivedData, maps);
+  }
+  const cached = maps.get(active);
+  if (cached !== undefined) return cached;
+  const entries = new Map([
+    ...archivedData.pages
+      .flat()
+      .map((thread) => [thread.id, thread] as const),
+    ...active,
+  ]);
+  maps.set(active, entries);
+  return entries;
+}
+
+function useComputedThreadEntryMap(): ReadonlyMap<string, ThreadListEntry> {
   const { data } = useSidebarNavigation();
   const archived = useArchivedThreads({}, { enabled: false });
-  return useMemo(() => {
-    const active = threadEntryMapFor(data);
-    if (archived.data === undefined) return active;
-    let maps = archivedEntryMaps.get(archived.data);
-    if (maps === undefined) {
-      maps = new WeakMap();
-      archivedEntryMaps.set(archived.data, maps);
-    }
-    const cached = maps.get(active);
-    if (cached !== undefined) return cached;
-    const entries = new Map([
-      ...archived.data.pages
-        .flat()
-        .map((thread) => [thread.id, thread] as const),
-      ...active,
-    ]);
-    maps.set(active, entries);
-    return entries;
-  }, [data, archived.data]);
+  return useMemo(
+    () => mergeSidebarThreadEntries(data, archived.data),
+    [archived.data, data],
+  );
+}
+
+function useThreadEntryMap(): ReadonlyMap<string, ThreadListEntry> {
+  const provided = useContext(SidebarThreadRowDataContext);
+  if (provided !== null) return provided.entriesById;
+  // oxlint-disable-next-line react/rules-of-hooks
+  return useComputedThreadEntryMap();
 }
 
 export function useSidebarThreadEntry(
@@ -258,13 +500,14 @@ export function useSidebarThreadEntry(
   return useThreadEntryMap().get(threadId) ?? null;
 }
 
-export function useSidebarThreadActions(): PluginSidebarThreadActions {
+function useSidebarThreadActionsFor(
+  entriesById: ReadonlyMap<string, ThreadListEntry>,
+): PluginSidebarThreadActions {
   const navigate = useRouteNavigate();
   const store = useStore();
   const isCompact = useIsCompactViewport();
   const setRootComposeProjectId = useSetRootComposeProjectId();
   const hostActions = useThreadActions();
-  const entriesById = useThreadEntryMap();
   const { mutateAsync: updateThreadAsync } = useUpdateThread();
 
   const requireEntry = useCallback(
@@ -349,6 +592,18 @@ export function useSidebarThreadActions(): PluginSidebarThreadActions {
       updateThreadAsync,
     ],
   );
+}
+
+function useComputedSidebarThreadActions(): PluginSidebarThreadActions {
+  const entriesById = useComputedThreadEntryMap();
+  return useSidebarThreadActionsFor(entriesById);
+}
+
+export function useSidebarThreadActions(): PluginSidebarThreadActions {
+  const provided = useContext(SidebarThreadRowDataContext);
+  if (provided !== null) return provided.actions;
+  // oxlint-disable-next-line react/rules-of-hooks
+  return useComputedSidebarThreadActions();
 }
 
 const NO_DRAFT: PluginSidebarThreadDraftState = Object.freeze({

@@ -1,20 +1,22 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, renderHook } from "@testing-library/react";
+import { act, cleanup, render, renderHook } from "@testing-library/react";
+import { memo, useEffect } from "react";
 import { getDefaultStore } from "jotai";
 import { PERSONAL_PROJECT_ID, type ThreadListEntry } from "@bb/domain";
 import { getThreadConversationCollapsedAtom } from "@/components/secondary-panel/threadSecondaryPanelAtoms";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeThreadListEntry } from "@bb/test-helpers/domain-fixtures";
 import {
+  SidebarThreadDataProvider,
   useSidebarThreadActions,
   useSidebarThreadDraft,
   useSidebarThreadDraftIds,
+  useSidebarThreadEntry,
   useSidebarThreadRowStatus,
   useSidebarThreadRowStatuses,
   useSidebarThreadShortcut,
   useSidebarThreads,
-  useSidebarThreadEntry,
 } from "./plugin-sidebar-hooks";
 import {
   clearPluginThreadRowStatuses,
@@ -58,15 +60,20 @@ const archiveQuery = vi.hoisted(() => ({
   fetchNextPage: vi.fn(async () => undefined),
 }));
 const archiveEnabled = vi.hoisted(() => vi.fn());
+const derivations = vi.hoisted(() => ({ navigation: 0, archived: 0 }));
 vi.mock("@/hooks/queries/thread-queries", () => ({
   useArchivedThreads: (_filters: object, options: { enabled: boolean }) => {
+    derivations.archived += 1;
     archiveEnabled(options.enabled);
     return archiveQuery;
   },
 }));
 
 vi.mock("@/hooks/queries/sidebar-navigation-query", () => ({
-  useSidebarNavigation: () => ({ data: state.data, isError: false }),
+  useSidebarNavigation: () => {
+    derivations.navigation += 1;
+    return { data: state.data, isError: false };
+  },
 }));
 
 vi.mock("@/hooks/queries/host-queries", () => {
@@ -74,18 +81,20 @@ vi.mock("@/hooks/queries/host-queries", () => {
   return { useHosts: () => ({ data: hosts }) };
 });
 
-vi.mock("@/components/thread/ThreadActionsProvider", () => ({
-  useThreadActions: () => ({
+vi.mock("@/components/thread/ThreadActionsProvider", () => {
+  const threadActions = {
     archiveThreadAndChildren: vi.fn(),
     requestDelete: vi.fn(),
     togglePin: vi.fn(),
     toggleRead: vi.fn(),
-  }),
-}));
+  };
+  return { useThreadActions: () => threadActions };
+});
 
-vi.mock("@/hooks/mutations/thread-state-mutations", () => ({
-  useUpdateThread: () => ({ mutateAsync: vi.fn() }),
-}));
+vi.mock("@/hooks/mutations/thread-state-mutations", () => {
+  const updateThread = { mutateAsync: vi.fn(async () => undefined) };
+  return { useUpdateThread: () => updateThread };
+});
 
 vi.mock("@/components/ui/app-route-anchor", () => ({
   useRouteNavigate: () => actions.navigate,
@@ -152,10 +161,14 @@ function payload(threads: ThreadListEntry[], sections: SidebarSection[] = []) {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  derivations.navigation = 0;
+  derivations.archived = 0;
   state.data = undefined;
   archiveQuery.data = undefined;
   archiveQuery.isLoadingError = false;
   archiveQuery.hasNextPage = false;
+  archiveQuery.isFetchingNextPage = false;
+  archiveQuery.isFetchNextPageError = false;
   drafts.threadIds.clear();
   clearPluginThreadRowStatuses("plugin-a");
   environmentProviders.providers = undefined;
@@ -544,5 +557,304 @@ describe("useEnvironmentProviders", () => {
         },
       ],
     });
+  });
+});
+
+describe("SidebarThreadDataProvider", () => {
+  interface RowObservation {
+    entryId: string | null;
+    hasDraft: boolean;
+    projectName: string | undefined;
+    actions: unknown;
+  }
+
+  function RowProbe({
+    threadId,
+    onObserve,
+  }: {
+    threadId: string;
+    onObserve: (observation: RowObservation) => void;
+  }) {
+    const actions = useSidebarThreadActions();
+    const entry = useSidebarThreadEntry(threadId);
+    const draft = useSidebarThreadDraft(threadId);
+    const { projects } = useSidebarThreads();
+    onObserve({
+      entryId: entry?.id ?? null,
+      hasDraft: draft.hasUnsubmittedDraft,
+      projectName: projects.find((project) => project.id === "proj_app")?.name,
+      actions,
+    });
+    return null;
+  }
+
+  function renderRows(threads: ThreadListEntry[]) {
+    const observations: RowObservation[] = [];
+    const build = () => (
+      <SidebarThreadDataProvider>
+        {threads.map((thread) => (
+          <RowProbe
+            key={thread.id}
+            threadId={thread.id}
+            onObserve={(observation) => observations.push(observation)}
+          />
+        ))}
+      </SidebarThreadDataProvider>
+    );
+    const view = render(build());
+    return {
+      observations,
+      rerender: () => view.rerender(build()),
+    };
+  }
+
+  function ArchivedConsumer({
+    onState,
+  }: {
+    onState?: (state: ReturnType<typeof useSidebarThreads>) => void;
+  }) {
+    const state = useSidebarThreads({
+      experimental_lifecycles: ["archived"],
+    });
+    onState?.(state);
+    return null;
+  }
+
+  function renderArchivedTree(options?: {
+    consumers?: number;
+    onState?: (state: ReturnType<typeof useSidebarThreads>) => void;
+  }) {
+    const build = (consumers: number) => (
+      <SidebarThreadDataProvider>
+        {Array.from({ length: consumers }, (_, index) => (
+          <ArchivedConsumer key={index} onState={options?.onState} />
+        ))}
+      </SidebarThreadDataProvider>
+    );
+    const view = render(build(options?.consumers ?? 1));
+    return {
+      view,
+      rerenderConsumers: (consumers: number) => view.rerender(build(consumers)),
+    };
+  }
+
+  it("derives sidebar-wide data once for many rows and keeps each row correct", () => {
+    const threads = Array.from({ length: 40 }, (_, index) =>
+      makeThreadListEntry({
+        id: `thr_${index}`,
+        projectId: "proj_app",
+        title: `Thread ${index}`,
+      }),
+    );
+    state.data = payload(threads);
+    drafts.threadIds.add("thr_7");
+
+    const { observations } = renderRows(threads);
+
+    expect(derivations.navigation).toBe(1);
+    expect(derivations.archived).toBe(1);
+    expect(observations).toHaveLength(threads.length);
+    expect(observations.every((row) => row.entryId !== null)).toBe(true);
+    expect(observations.map((row) => row.entryId)).toEqual(
+      threads.map((thread) => thread.id),
+    );
+    expect(observations.filter((row) => row.hasDraft)).toHaveLength(1);
+    expect(observations[7]?.hasDraft).toBe(true);
+    expect(observations[0]?.hasDraft).toBe(false);
+    expect(observations.every((row) => row.projectName === "App")).toBe(true);
+    expect(new Set(observations.map((row) => row.actions)).size).toBe(1);
+  });
+
+  it("shares one actions identity across rerenders while the data is unchanged", () => {
+    const threads = [makeThreadListEntry({ id: "thr_1", projectId: "proj_app" })];
+    state.data = payload(threads);
+    const { observations, rerender } = renderRows(threads);
+    const first = observations[0]?.actions;
+    expect(derivations.navigation).toBe(1);
+    rerender();
+    expect(derivations.navigation).toBe(2);
+    expect(observations[observations.length - 1]?.actions).toBe(first);
+  });
+
+  it("falls back to per-hook derivation outside the provider", () => {
+    state.data = payload([makeThreadListEntry({ id: "thr_1" })]);
+    renderHook(() => useSidebarThreads());
+    renderHook(() => useSidebarThreadEntry("thr_1"));
+    expect(derivations.navigation).toBe(2);
+    expect(derivations.archived).toBe(2);
+  });
+
+  it("keeps the archived query off until a consumer asks and releases it after", () => {
+    state.data = payload([]);
+    const { rerenderConsumers } = renderArchivedTree({ consumers: 0 });
+    expect(archiveEnabled).toHaveBeenLastCalledWith(false);
+
+    rerenderConsumers(1);
+    expect(archiveEnabled).toHaveBeenLastCalledWith(true);
+
+    rerenderConsumers(0);
+    expect(archiveEnabled).toHaveBeenLastCalledWith(false);
+  });
+
+  it("keeps the archived query on while any consumer still holds it", () => {
+    state.data = payload([]);
+    const { rerenderConsumers } = renderArchivedTree({ consumers: 2 });
+    expect(archiveEnabled).toHaveBeenLastCalledWith(true);
+
+    rerenderConsumers(1);
+    expect(archiveEnabled).toHaveBeenLastCalledWith(true);
+
+    rerenderConsumers(0);
+    expect(archiveEnabled).toHaveBeenLastCalledWith(false);
+  });
+
+  it("reports ready on the first frame when archived data is already cached", () => {
+    const archived = makeThreadListEntry({
+      id: "thr_archived",
+      archivedAt: 42,
+    });
+    state.data = payload([]);
+    archiveQuery.data = { pages: [[archived]] };
+    archiveQuery.hasNextPage = true;
+    const seen: ReturnType<typeof useSidebarThreads>[] = [];
+
+    renderArchivedTree({ consumers: 1, onState: (state) => seen.push(state) });
+
+    expect(seen[0]?.experimental_archived?.status).toBe("ready");
+    expect(seen[0]?.experimental_archived?.hasNextPage).toBe(true);
+    expect(seen[0]?.threads.map((thread) => thread.id)).toEqual([archived.id]);
+  });
+
+  it("reports loading for an archived-only view with no data yet", () => {
+    state.data = payload([]);
+    const seen: ReturnType<typeof useSidebarThreads>[] = [];
+
+    renderArchivedTree({ consumers: 1, onState: (state) => seen.push(state) });
+
+    expect(seen[0]?.status).toBe("loading");
+    expect(seen[0]?.experimental_archived?.status).toBe("loading");
+    expect(seen[0]?.threads).toEqual([]);
+  });
+
+  it("passes archive paging flags through to the archived state", () => {
+    state.data = payload([]);
+    archiveQuery.data = { pages: [[]] };
+    archiveQuery.hasNextPage = true;
+    archiveQuery.isFetchingNextPage = true;
+    archiveQuery.isFetchNextPageError = true;
+    const seen: ReturnType<typeof useSidebarThreads>[] = [];
+
+    renderArchivedTree({ consumers: 1, onState: (state) => seen.push(state) });
+
+    expect(seen[0]?.experimental_archived).toMatchObject({
+      hasNextPage: true,
+      isFetchingNextPage: true,
+      isFetchNextPageError: true,
+    });
+  });
+
+  it("keeps state identity when a consumer passes an inline lifecycles array", () => {
+    state.data = payload([]);
+    const { result, rerender } = renderHook(
+      () => useSidebarThreads({ experimental_lifecycles: ["archived"] }),
+      {
+        wrapper: ({ children }) => (
+          <SidebarThreadDataProvider>{children}</SidebarThreadDataProvider>
+        ),
+      },
+    );
+    const before = result.current;
+    rerender();
+    rerender();
+    expect(result.current).toBe(before);
+  });
+
+  it("does not re-render a row that only reads entries and actions when paging flags change", () => {
+    const renders = { list: 0, row: 0 };
+    const RowOnly = memo(function RowOnly({
+      threadId,
+      onRender,
+    }: {
+      threadId: string;
+      onRender: () => void;
+    }) {
+      useSidebarThreadActions();
+      useSidebarThreadEntry(threadId);
+      useEffect(() => {
+        onRender();
+      });
+      return null;
+    });
+    function ListConsumer({ onRender }: { onRender: () => void }) {
+      useSidebarThreads({ experimental_lifecycles: ["archived"] });
+      useEffect(() => {
+        onRender();
+      });
+      return null;
+    }
+    state.data = payload([
+      makeThreadListEntry({ id: "thr_1", projectId: "proj_app" }),
+    ]);
+    archiveQuery.data = { pages: [[]] };
+    const onListRender = () => {
+      renders.list += 1;
+    };
+    const onRowRender = () => {
+      renders.row += 1;
+    };
+    const tree = () => (
+      <SidebarThreadDataProvider>
+        <ListConsumer onRender={onListRender} />
+        <RowOnly threadId="thr_1" onRender={onRowRender} />
+      </SidebarThreadDataProvider>
+    );
+    const view = render(tree());
+    renders.list = 0;
+    renders.row = 0;
+
+    archiveQuery.isFetchingNextPage = true;
+    view.rerender(tree());
+
+    expect(renders.list).toBeGreaterThan(0);
+    expect(renders.row).toBe(0);
+  });
+
+  it("keeps an outside fallback consumer correct beside a mounted provider", () => {
+    const threads = [
+      makeThreadListEntry({ id: "thr_1", projectId: "proj_app" }),
+      makeThreadListEntry({ id: "thr_2", projectId: "proj_app" }),
+    ];
+    state.data = payload(threads);
+    const outside: { entryId: string | null; threadIds: string[] }[] = [];
+    const inside: RowObservation[] = [];
+
+    function OutsideConsumer() {
+      const state = useSidebarThreads();
+      const entry = useSidebarThreadEntry("thr_1");
+      outside.push({
+        entryId: entry?.id ?? null,
+        threadIds: state.threads.map((thread) => thread.id),
+      });
+      return null;
+    }
+
+    render(
+      <>
+        <OutsideConsumer />
+        <SidebarThreadDataProvider>
+          <RowProbe
+            threadId="thr_2"
+            onObserve={(observation) => inside.push(observation)}
+          />
+        </SidebarThreadDataProvider>
+      </>,
+    );
+
+    expect(outside[0]?.threadIds).toEqual(["thr_1", "thr_2"]);
+    expect(outside[0]?.entryId).toBe("thr_1");
+    expect(inside[0]?.entryId).toBe("thr_2");
+    expect(inside[0]?.projectName).toBe("App");
+    expect(derivations.navigation).toBe(3);
+    expect(derivations.archived).toBe(3);
   });
 });
