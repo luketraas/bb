@@ -29,8 +29,9 @@ const NO_INDICATOR: PaneContentSplitIndicator = {
   miniMap: null,
 };
 
-// A disabled indicator must not subscribe to the persisted layout: mounting
-// splitLayoutAtom re-reads storage and can replace the in-memory layout.
+// A disabled or compact indicator shows nothing and must not subscribe to the
+// persisted layout: mounting splitLayoutAtom re-reads storage and can replace
+// the in-memory layout.
 const NO_INDICATOR_ATOM = atom(NO_INDICATOR);
 
 export interface ThreadSplitIndicatorTarget {
@@ -195,7 +196,7 @@ export function usePaneContentSplitIndicator(
       buildContentIndicator(layout, contentKey, enabled, isCompact),
     [contentKey, enabled, isCompact],
   );
-  return useSplitIndicator(select, enabled);
+  return useSplitIndicator(select, enabled && !isCompact);
 }
 
 export function useThreadGroupSplitIndicator(
@@ -211,5 +212,5 @@ export function useThreadGroupSplitIndicator(
       buildGroupIndicator(layout, groupKey, isCompact),
     [groupKey, isCompact],
   );
-  return useSplitIndicator(select, groupKey.length > 0);
+  return useSplitIndicator(select, groupKey.length > 0 && !isCompact);
 }

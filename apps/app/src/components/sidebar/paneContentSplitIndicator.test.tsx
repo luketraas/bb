@@ -210,3 +210,31 @@ describe("usePaneContentSplitIndicator", () => {
     expect(after.map((slot) => slot.isFocused)).toEqual([false, true, false]);
   });
 });
+
+describe("inactive split indicators", () => {
+  function renderWith(enabled: boolean) {
+    const store = createStore();
+    const layout = twoPanes("pane-1");
+    store.set(splitLayoutAtom, layout);
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <Provider store={store}>{children}</Provider>
+    );
+    renderHook(() => usePaneContentSplitIndicator(content("t1"), enabled), {
+      wrapper,
+    });
+    return { store, layout };
+  }
+
+  // Mounting the persisted layout atom re-reads storage, which can replace
+  // the in-memory layout; an indicator that shows nothing must not mount it.
+  it("does not mount the persisted layout when disabled", () => {
+    const { store, layout } = renderWith(false);
+    expect(store.get(splitLayoutAtom)).toBe(layout);
+  });
+
+  it("does not mount the persisted layout on compact viewports", () => {
+    compactState.value = true;
+    const { store, layout } = renderWith(true);
+    expect(store.get(splitLayoutAtom)).toBe(layout);
+  });
+});
