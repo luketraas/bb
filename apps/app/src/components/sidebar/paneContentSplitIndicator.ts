@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { useAtomValue } from "jotai";
+import { atom, useAtomValue } from "jotai";
 import { selectAtom } from "jotai/utils";
 import { useIsCompactViewport } from "@bb/shared-ui/hooks/use-compact-viewport";
 import { splitLayoutAtom } from "@/lib/split-layout/atoms";
@@ -28,6 +28,10 @@ const NO_INDICATOR: PaneContentSplitIndicator = {
   isOpenInSplit: false,
   miniMap: null,
 };
+
+// A disabled indicator must not subscribe to the persisted layout: mounting
+// splitLayoutAtom re-reads storage and can replace the in-memory layout.
+const NO_INDICATOR_ATOM = atom(NO_INDICATOR);
 
 export interface ThreadSplitIndicatorTarget {
   id: string;
@@ -168,10 +172,14 @@ function buildGroupIndicator(
 
 function useSplitIndicator(
   select: (layout: SplitLayout | null) => PaneContentSplitIndicator,
+  active: boolean,
 ): PaneContentSplitIndicator {
   const indicatorAtom = useMemo(
-    () => selectAtom(splitLayoutAtom, select, indicatorsEqual),
-    [select],
+    () =>
+      active
+        ? selectAtom(splitLayoutAtom, select, indicatorsEqual)
+        : NO_INDICATOR_ATOM,
+    [active, select],
   );
   return useAtomValue(indicatorAtom);
 }
@@ -187,7 +195,7 @@ export function usePaneContentSplitIndicator(
       buildContentIndicator(layout, contentKey, enabled, isCompact),
     [contentKey, enabled, isCompact],
   );
-  return useSplitIndicator(select);
+  return useSplitIndicator(select, enabled);
 }
 
 export function useThreadGroupSplitIndicator(
@@ -203,5 +211,5 @@ export function useThreadGroupSplitIndicator(
       buildGroupIndicator(layout, groupKey, isCompact),
     [groupKey, isCompact],
   );
-  return useSplitIndicator(select);
+  return useSplitIndicator(select, groupKey.length > 0);
 }
