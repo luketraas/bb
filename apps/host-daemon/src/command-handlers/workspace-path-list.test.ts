@@ -1,9 +1,13 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { runGit } from "@bb/host-workspace";
-import { listWorkspacePaths } from "./file-list.js";
+import {
+  createWorkspaceListingCache,
+  invalidateWorkspacePathListings,
+  listWorkspacePaths,
+} from "./file-list.js";
 import { listHostPaths } from "./host-files.js";
 
 const roots: string[] = [];
@@ -31,6 +35,7 @@ function listingArgs(root: string) {
     includeHidden: true,
     respectGitIgnore: true,
     excludeNames: [],
+    reuseRecentListing: false,
   };
 }
 
@@ -41,6 +46,10 @@ async function paths(root: string) {
 }
 
 afterEach(async () => {
+  vi.useRealTimers();
+  for (const root of roots) {
+    invalidateWorkspacePathListings(await fs.realpath(root).catch(() => root));
+  }
   await Promise.all(
     roots
       .splice(0)
@@ -266,4 +275,215 @@ describe("workspace path discovery", () => {
 
     expect(result).toHaveLength(fileCount);
   }, 60_000);
+});
+
+describe("recent workspace listing reuse", () => {
+  const TTL_MS = 2_000;
+
+  function createCache(
+    limits: { maxListings?: number; maxPaths?: number } = {},
+  ) {
+    return createWorkspaceListingCache({
+      ttlMs: TTL_MS,
+      maxListings: limits.maxListings ?? 32,
+      maxPaths: limits.maxPaths ?? 100_000,
+    });
+  }
+
+  async function settledRoot(files = ["first.txt"]) {
+    const root = await fs.realpath(await createRoot());
+    for (const file of files) await write(root, file);
+    return root;
+  }
+
+  function recentArgs(root: string, reuseRecentListing = true) {
+    return {
+      ...listingArgs(root),
+      respectGitIgnore: false,
+      reuseRecentListing,
+    };
+  }
+
+  async function listedPaths(listing: ReturnType<typeof listWorkspacePaths>) {
+    return (await listing).map((entry) => entry.path);
+  }
+
+  it("reuses a settled listing for successive queried requests", async () => {
+    const cache = createCache();
+    const root = await settledRoot();
+    const first = cache.list(recentArgs(root));
+    await first;
+    await write(root, "second.txt");
+
+    const second = cache.list(recentArgs(root));
+    expect(second).toBe(first);
+    expect(await listedPaths(second)).not.toContain("second.txt");
+  });
+
+  it("rediscovers for requests without a query through the host command", async () => {
+    const root = await settledRoot();
+    const command = {
+      type: "host.list_paths" as const,
+      path: root,
+      includeFiles: true,
+      includeDirectories: true,
+      includeHidden: true,
+      respectGitIgnore: false,
+      excludeNames: [],
+      limit: 10,
+    };
+    await listHostPaths({ ...command, query: "first" });
+    await write(root, "second.txt");
+    expect(
+      (await listHostPaths(command)).paths.map((entry) => entry.path),
+    ).toContain("second.txt");
+    await write(root, "third.txt");
+    expect(
+      (await listHostPaths({ ...command, query: "third" })).paths.map(
+        (entry) => entry.path,
+      ),
+    ).not.toContain("third.txt");
+  });
+
+  it("does not let a request without a query join a scan invalidated in flight", async () => {
+    const cache = createCache();
+    const root = await settledRoot();
+    const queried = cache.list(recentArgs(root));
+    cache.invalidate(root);
+    const joined = cache.list(recentArgs(root));
+    const fresh = cache.list(recentArgs(root, false));
+
+    expect(joined).toBe(queried);
+    expect(fresh).not.toBe(queried);
+    expect(cache.list(recentArgs(root))).toBe(fresh);
+    await fresh;
+    await queried;
+  });
+
+  it("rediscovers once the freshness window after discovery expires", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const cache = createCache();
+    const root = await settledRoot();
+    const first = cache.list(recentArgs(root));
+    await first;
+
+    vi.advanceTimersByTime(TTL_MS - 1);
+    const beforeExpiry = cache.list(recentArgs(root));
+    await beforeExpiry;
+    expect(beforeExpiry).toBe(first);
+    vi.advanceTimersByTime(1);
+    await write(root, "second.txt");
+    const refreshed = cache.list(recentArgs(root));
+    expect(refreshed).not.toBe(first);
+    expect(await listedPaths(refreshed)).toContain("second.txt");
+  });
+
+  it("drops settled listings for a changed root, its descendants and its ancestors", async () => {
+    const cache = createCache();
+    const root = await settledRoot(["src/app.ts"]);
+    const nestedRoot = path.join(root, "src");
+    const whole = cache.list(recentArgs(root));
+    const nested = cache.list(recentArgs(nestedRoot));
+    await Promise.all([whole, nested]);
+
+    cache.invalidate(nestedRoot);
+    const [wholeAgain, nestedAgain] = [
+      cache.list(recentArgs(root)),
+      cache.list(recentArgs(nestedRoot)),
+    ];
+    await Promise.all([wholeAgain, nestedAgain]);
+    expect(wholeAgain).not.toBe(whole);
+    expect(nestedAgain).not.toBe(nested);
+
+    cache.invalidate(path.parse(root).root);
+    const afterFilesystemRoot = cache.list(recentArgs(root));
+    await afterFilesystemRoot;
+    expect(afterFilesystemRoot).not.toBe(wholeAgain);
+  });
+
+  it("keeps sharing a queried scan invalidated in flight but does not reuse its result", async () => {
+    const cache = createCache();
+    const root = await settledRoot();
+    const first = cache.list(recentArgs(root));
+    cache.invalidate(root);
+    expect(cache.list(recentArgs(root))).toBe(first);
+    await first;
+
+    const next = cache.list(recentArgs(root));
+    await next;
+    expect(next).not.toBe(first);
+  });
+
+  it("keeps listings for unrelated roots", async () => {
+    const cache = createCache();
+    const root = await settledRoot();
+    const other = await settledRoot();
+    const first = cache.list(recentArgs(root));
+    await first;
+
+    cache.invalidate(other);
+
+    const reused = cache.list(recentArgs(root));
+    await reused;
+    expect(reused).toBe(first);
+  });
+
+  it("evicts the least recently used listing beyond the listing limit", async () => {
+    const cache = createCache({ maxListings: 2 });
+    const [a, b, c] = await Promise.all([
+      settledRoot(),
+      settledRoot(),
+      settledRoot(),
+    ]);
+    const listingA = cache.list(recentArgs(a));
+    await listingA;
+    const listingB = cache.list(recentArgs(b));
+    await listingB;
+    expect(cache.list(recentArgs(a))).toBe(listingA);
+    const listingC = cache.list(recentArgs(c));
+    await listingC;
+
+    expect(cache.size).toBe(2);
+    expect(cache.list(recentArgs(a))).toBe(listingA);
+    expect(cache.list(recentArgs(c))).toBe(listingC);
+    const rediscoveredB = cache.list(recentArgs(b));
+    expect(rediscoveredB).not.toBe(listingB);
+    await rediscoveredB;
+  });
+
+  it("evicts listings beyond the path limit and never keeps an oversized listing", async () => {
+    const cache = createCache({ maxPaths: 4 });
+    const small = await settledRoot(["one.txt", "two.txt"]);
+    const other = await settledRoot(["three.txt", "four.txt"]);
+    const oversized = await settledRoot([
+      "a.txt",
+      "b.txt",
+      "c.txt",
+      "d.txt",
+      "e.txt",
+    ]);
+
+    const listingSmall = cache.list(recentArgs(small));
+    await listingSmall;
+    const listingOther = cache.list(recentArgs(other));
+    await listingOther;
+    const listingOversized = cache.list(recentArgs(oversized));
+    await listingOversized;
+    expect(cache.size).toBe(2);
+    const oversizedAgain = cache.list(recentArgs(oversized));
+    expect(oversizedAgain).not.toBe(listingOversized);
+    await oversizedAgain;
+    expect(cache.size).toBe(2);
+
+    const third = await settledRoot(["six.txt"]);
+    const listingThird = cache.list(recentArgs(third));
+    await listingThird;
+
+    expect(cache.size).toBe(2);
+    expect(cache.list(recentArgs(other))).toBe(listingOther);
+    expect(cache.list(recentArgs(third))).toBe(listingThird);
+    const smallAgain = cache.list(recentArgs(small));
+    expect(smallAgain).not.toBe(listingSmall);
+    await smallAgain;
+  });
 });

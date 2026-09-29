@@ -10,7 +10,14 @@ import {
   makeWorkspaceMergeBase,
   makeWorkspaceStatus,
 } from "@bb/test-helpers";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import {
+  invalidateWorkspacePathListings,
+  listWorkspacePaths,
+} from "./command-handlers/file-list.js";
 import { WatchManager, type WatchManagerOptions } from "./watch-manager.js";
 
 type GetLocalStateFingerprintResult = Awaited<
@@ -261,6 +268,68 @@ describe("WatchManager", () => {
     });
 
     expect(stopWatchingStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops recent workspace listings when a workspace watched through a symlink changes", async () => {
+    const parent = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), "bb-watch-listing-")),
+    );
+    const root = path.join(parent, "real");
+    const alias = path.join(parent, "alias");
+    await fs.mkdir(root);
+    await fs.symlink(root, alias, "dir");
+    let watchWorkspaceArgs: WatchWorkspaceArgs | undefined;
+    const { hostWatcher } = createFakeHostWatcher({
+      watchWorkspaceImplementation: (args) => {
+        watchWorkspaceArgs = args;
+        return () => undefined;
+      },
+    });
+    const manager = new WatchManager({
+      hostWatcher,
+      provisionWorkspace: vi.fn(async () => createFakeWorkspace(alias, false)),
+    });
+    const listingArgs = {
+      root,
+      includeFiles: true,
+      includeDirectories: true,
+      includeHidden: true,
+      respectGitIgnore: false,
+      excludeNames: [],
+      reuseRecentListing: true,
+    };
+    try {
+      await manager.replaceWatchSet({
+        generation: 1,
+        workspaceTargets: [
+          {
+            environmentId: "env-listing",
+            workspaceContext: { workspacePath: alias },
+          },
+        ],
+        threadStorageTargets: [],
+      });
+      const first = listWorkspacePaths(listingArgs);
+      await first;
+      await fs.writeFile(path.join(root, "added.txt"), "added");
+
+      watchWorkspaceArgs?.onChange({
+        changedPaths: [path.join(alias, "added.txt")],
+        changeKinds: ["workspace-content-changed"],
+        kind: "workspace-status-changed",
+        environmentId: "env-listing",
+      });
+
+      const refreshed = listWorkspacePaths(listingArgs);
+      expect(refreshed).not.toBe(first);
+      expect((await refreshed).map((entry) => entry.path)).toEqual([
+        "added.txt",
+      ]);
+    } finally {
+      await manager.shutdown();
+      invalidateWorkspacePathListings(root);
+      await fs.rm(parent, { recursive: true, force: true });
+    }
   });
 
   it("reports workspace content changes when the local fingerprint is unchanged", async () => {
@@ -873,6 +942,63 @@ describe("WatchManager", () => {
         rootPath: "/tmp/env-watch",
       },
     });
+  });
+
+  it("drops recent thread-storage listings when that watcher changes or fails", async () => {
+    const threadStorageRootPath = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), "bb-watch-storage-")),
+    );
+    const threadRoot = path.join(threadStorageRootPath, "thread-1");
+    await fs.mkdir(threadRoot);
+    let watchThreadStorageRootArgs: WatchThreadStorageRootArgs | undefined;
+    const { hostWatcher } = createFakeHostWatcher({
+      watchThreadStorageRootImplementation: (args) => {
+        watchThreadStorageRootArgs = args;
+        return () => undefined;
+      },
+    });
+    const manager = new WatchManager({ hostWatcher, threadStorageRootPath });
+    const listingArgs = {
+      root: threadRoot,
+      includeFiles: true,
+      includeDirectories: true,
+      includeHidden: true,
+      respectGitIgnore: false,
+      excludeNames: [],
+      reuseRecentListing: true,
+    };
+    try {
+      await manager.replaceWatchSet({
+        generation: 1,
+        workspaceTargets: [],
+        threadStorageTargets: [
+          { environmentId: "env-storage", threadId: "thread-1" },
+        ],
+      });
+      const first = listWorkspacePaths(listingArgs);
+      await first;
+      watchThreadStorageRootArgs?.onChange({
+        kind: "thread-storage-changed",
+        environmentId: "env-storage",
+        threadId: "thread-1",
+      });
+      const afterChange = listWorkspacePaths(listingArgs);
+      await afterChange;
+      expect(afterChange).not.toBe(first);
+
+      watchThreadStorageRootArgs?.onWatchError({
+        kind: "thread-storage-watch-error",
+        rootPath: threadStorageRootPath,
+        message: "watch failed",
+      });
+      const afterError = listWorkspacePaths(listingArgs);
+      await afterError;
+      expect(afterError).not.toBe(afterChange);
+    } finally {
+      await manager.shutdown();
+      invalidateWorkspacePathListings(threadStorageRootPath);
+      await fs.rm(threadStorageRootPath, { recursive: true, force: true });
+    }
   });
 
   it("starts and stops the root thread-storage watcher from snapshots", async () => {

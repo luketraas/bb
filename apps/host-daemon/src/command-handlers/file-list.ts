@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fuzzyMatchPaths } from "@bb/fuzzy-match";
 import { detectGitRepo, runGit } from "@bb/host-workspace";
+import { isPathWithinDirectory } from "@bb/process-utils";
 import type {
   HostPathEntry,
   HostPathEntryKind,
@@ -58,28 +59,138 @@ interface ListWorkspacePathsArgs extends PathListInclusion {
   includeHidden: boolean;
   excludeNames: readonly string[];
   respectGitIgnore: boolean;
+  reuseRecentListing: boolean;
 }
 
-const pendingListings = new Map<string, Promise<ListedPath[]>>();
+interface WorkspaceListing {
+  root: string;
+  paths: Promise<ListedPath[]>;
+  settled: boolean;
+  reusable: boolean;
+  pathCount: number;
+  expiry: NodeJS.Timeout | null;
+}
+
+interface WorkspaceListingLimits {
+  ttlMs: number;
+  maxListings: number;
+  maxPaths: number;
+}
+
+export function createWorkspaceListingCache(limits: WorkspaceListingLimits) {
+  const listings = new Map<string, WorkspaceListing>();
+
+  function forget(key: string, listing: WorkspaceListing): void {
+    if (listings.get(key) !== listing) return;
+    listings.delete(key);
+    if (listing.expiry !== null) clearTimeout(listing.expiry);
+  }
+
+  function trim(): void {
+    let pathCount = 0;
+    for (const listing of listings.values()) pathCount += listing.pathCount;
+    for (const [key, listing] of listings) {
+      if (listings.size <= limits.maxListings && pathCount <= limits.maxPaths) {
+        break;
+      }
+      if (!listing.settled) continue;
+      pathCount -= listing.pathCount;
+      forget(key, listing);
+    }
+  }
+
+  function settle(
+    key: string,
+    listing: WorkspaceListing,
+    paths: ListedPath[],
+  ): ListedPath[] {
+    if (listings.get(key) !== listing) return paths;
+    if (!listing.reusable || paths.length > limits.maxPaths) {
+      forget(key, listing);
+      return paths;
+    }
+    listing.settled = true;
+    listing.pathCount = paths.length;
+    listing.expiry = setTimeout(() => forget(key, listing), limits.ttlMs);
+    listing.expiry.unref();
+    trim();
+    return paths;
+  }
+
+  return {
+    list(args: ListWorkspacePathsArgs): Promise<ListedPath[]> {
+      const key = JSON.stringify([
+        args.root,
+        args.includeHidden,
+        [...new Set(args.excludeNames)].sort(),
+        args.respectGitIgnore,
+        args.includeFiles,
+        args.includeDirectories,
+      ]);
+      const existing = listings.get(key);
+      if (existing !== undefined) {
+        if (existing.settled && args.reuseRecentListing) {
+          listings.delete(key);
+          listings.set(key, existing);
+          return existing.paths;
+        }
+        if (
+          !existing.settled &&
+          (existing.reusable || args.reuseRecentListing)
+        ) {
+          return existing.paths;
+        }
+        forget(key, existing);
+      }
+      const listing: WorkspaceListing = {
+        root: args.root,
+        settled: false,
+        reusable: true,
+        pathCount: 0,
+        expiry: null,
+        paths: discoverWorkspacePaths(args).then(
+          (paths) => settle(key, listing, paths),
+          (error: unknown) => {
+            forget(key, listing);
+            throw error;
+          },
+        ),
+      };
+      listings.set(key, listing);
+      return listing.paths;
+    },
+    invalidate(changedRoot: string): void {
+      for (const [key, listing] of listings) {
+        if (
+          !isPathWithinDirectory(listing.root, changedRoot) &&
+          !isPathWithinDirectory(changedRoot, listing.root)
+        ) {
+          continue;
+        }
+        if (listing.settled) forget(key, listing);
+        else listing.reusable = false;
+      }
+    },
+    get size() {
+      return listings.size;
+    },
+  };
+}
+
+const workspaceListings = createWorkspaceListingCache({
+  ttlMs: 2_000,
+  maxListings: 32,
+  maxPaths: 100_000,
+});
 
 export function listWorkspacePaths(
   args: ListWorkspacePathsArgs,
 ): Promise<ListedPath[]> {
-  const key = JSON.stringify([
-    args.root,
-    args.includeHidden,
-    [...new Set(args.excludeNames)].sort(),
-    args.respectGitIgnore,
-    args.includeFiles,
-    args.includeDirectories,
-  ]);
-  const existing = pendingListings.get(key);
-  if (existing) return existing;
-  const listing = discoverWorkspacePaths(args).finally(() => {
-    pendingListings.delete(key);
-  });
-  pendingListings.set(key, listing);
-  return listing;
+  return workspaceListings.list(args);
+}
+
+export function invalidateWorkspacePathListings(changedRoot: string): void {
+  workspaceListings.invalidate(changedRoot);
 }
 
 async function discoverWorkspacePaths(

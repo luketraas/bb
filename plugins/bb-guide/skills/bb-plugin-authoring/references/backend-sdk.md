@@ -250,7 +250,12 @@ depth or an exact root-relative path with `/` separators. `.git` and symlinks ar
 Project and environment workspace file searches honor Git ignore rules, retaining
 tracked and non-ignored untracked files, including hidden files. Generic
 `files.list` and `files.listPaths` retain filesystem listing behavior so tools
-can inspect ignored files. Non-Git workspaces use filesystem listings.
+can inspect ignored files. Non-Git workspaces use filesystem listings. A
+search with a non-empty `query` may reuse a listing of the same root and
+options that finished within the last 2 seconds; the host drops it sooner when
+it sees a change under that root. Listings without a query never reuse a
+finished listing; they only share a discovery that is still running and has
+seen no change.
 
 `bb.sdk.files.createPreview({ hostId?, rootPath, ttlMs? })` returns a temporary
 path-shaped `baseUrl`. Append individually encoded relative path segments to

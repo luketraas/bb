@@ -79,6 +79,7 @@ export async function listHostFiles(
           respectGitIgnore: command.respectGitIgnore,
           includeFiles: true,
           includeDirectories: false,
+          reuseRecentListing: Boolean(command.query),
         })
       ).map((entry) => entry.path),
       limit: command.limit,
@@ -113,6 +114,7 @@ export async function listHostPaths(
         includeHidden: command.includeHidden,
         excludeNames: command.excludeNames,
         respectGitIgnore: command.respectGitIgnore,
+        reuseRecentListing: Boolean(command.query),
       }),
       limit: command.limit,
       includeFiles: command.includeFiles,

@@ -1,3 +1,5 @@
+import { realpathSync } from "node:fs";
+import { realpath } from "node:fs/promises";
 import type { DiscoveredWorkspaceProperties } from "@bb/domain";
 import {
   provisionWorkspace,
@@ -16,6 +18,7 @@ import type {
   WorkspaceStatusWatchChangeKind,
   WorkspaceWatchError,
 } from "@bb/host-watcher";
+import { invalidateWorkspacePathListings } from "./command-handlers/file-list.js";
 import { userExecutableProcessOptions } from "./user-executable-env.js";
 
 type StopWatching = () => void | Promise<void>;
@@ -36,6 +39,7 @@ interface WorkspaceWatchState {
 }
 
 interface WorkspaceWatchEntry {
+  listingRoot: string;
   stopWatchingStatus: StopWatching;
   target: HostDaemonWatchSetWorkspaceTarget;
   watchState: WorkspaceWatchState;
@@ -78,6 +82,14 @@ function toErrorMessage(error: Error): string {
   return error.message.trim().length > 0
     ? error.message
     : "Unknown workspace watch error";
+}
+
+function canonicalPath(candidate: string): string {
+  try {
+    return realpathSync(candidate);
+  } catch {
+    return candidate;
+  }
 }
 
 function workspaceWatchKindsIncludeLocalState(
@@ -229,7 +241,11 @@ export class WatchManager {
       const workspace = await this.provisionWorkspace({
         path: target.workspaceContext.workspacePath,
       });
+      const listingRoot = await realpath(workspace.path).catch(
+        () => workspace.path,
+      );
       const entry: WorkspaceWatchEntry = {
+        listingRoot,
         stopWatchingStatus: STOP_WATCHING,
         target,
         watchState: {
@@ -257,6 +273,7 @@ export class WatchManager {
           });
         },
         onWatchError: (error) => {
+          invalidateWorkspacePathListings(listingRoot);
           this.options.onWorkspaceStatusWatchError?.({ error });
         },
       });
@@ -306,6 +323,7 @@ export class WatchManager {
     changeKinds: readonly WorkspaceStatusWatchChangeKind[];
     entry: WorkspaceWatchEntry;
   }): void {
+    invalidateWorkspacePathListings(args.entry.listingRoot);
     if (
       this.workspaceEntries.get(args.entry.target.environmentId) !== args.entry
     ) {
@@ -477,6 +495,7 @@ export class WatchManager {
       return;
     }
 
+    const threadStorageListingRoot = canonicalPath(threadStorageRootPath);
     this.stopWatchingThreadStorageRoot =
       this.hostWatcher.watchThreadStorageRoot({
         threadStorageRootPath,
@@ -484,6 +503,7 @@ export class WatchManager {
           this.threadStorageTargets.get(threadId) ?? null,
         onChange: (event) => {
           if (event.kind === "thread-storage-changed") {
+            invalidateWorkspacePathListings(threadStorageListingRoot);
             this.options.onThreadStorageChanged?.({
               environmentId: event.environmentId,
               threadId: event.threadId,
@@ -491,6 +511,7 @@ export class WatchManager {
           }
         },
         onWatchError: (error) => {
+          invalidateWorkspacePathListings(threadStorageListingRoot);
           this.options.onThreadStorageWatchError?.({
             error,
           });
