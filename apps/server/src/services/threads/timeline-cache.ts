@@ -3,11 +3,12 @@ import type { CompletedTurnDisplay, ThreadStatus } from "@bb/domain";
 import type { ThreadTimelinePageRequest } from "./timeline-pagination.js";
 
 const DEFAULT_MAX_ENTRIES = 128;
-const DEFAULT_MAX_CACHEABLE_ROWS = 200;
+const DEFAULT_MAX_BYTES = 16 * 1024 * 1024;
+const MAX_ENTRY_SHARE_OF_BUDGET = 4;
 
 interface ThreadTimelineCacheOptions {
   maxEntries?: number;
-  maxCacheableRows?: number;
+  maxBytes?: number;
 }
 
 interface ThreadTimelineCache {
@@ -18,20 +19,28 @@ interface ThreadTimelineCache {
   ): ThreadTimelineResponse;
   invalidateThread(threadId: string): void;
   readonly size: number;
+  readonly bytes: number;
 }
 
 interface ThreadTimelineCacheEntry {
   response: ThreadTimelineResponse;
   threadId: string;
+  bytes: number;
 }
 
 export function createThreadTimelineCache(
   options: ThreadTimelineCacheOptions = {},
 ): ThreadTimelineCache {
   const maxEntries = options.maxEntries ?? DEFAULT_MAX_ENTRIES;
-  const maxCacheableRows =
-    options.maxCacheableRows ?? DEFAULT_MAX_CACHEABLE_ROWS;
+  const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+  const maxEntryBytes = maxBytes / MAX_ENTRY_SHARE_OF_BUDGET;
   const entries = new Map<string, ThreadTimelineCacheEntry>();
+  let totalBytes = 0;
+
+  function remove(key: string, entry: ThreadTimelineCacheEntry): void {
+    entries.delete(key);
+    totalBytes -= entry.bytes;
+  }
 
   return {
     getOrBuild(threadId, key, build) {
@@ -43,27 +52,32 @@ export function createThreadTimelineCache(
       }
 
       const value = build();
-      if (value.rows.length <= maxCacheableRows) {
-        entries.set(key, { response: value, threadId });
-        while (entries.size > maxEntries) {
-          const oldest = entries.keys().next().value;
-          if (oldest === undefined) {
-            break;
-          }
-          entries.delete(oldest);
+      const bytes = Buffer.byteLength(JSON.stringify(value));
+      if (bytes > maxEntryBytes) {
+        return value;
+      }
+      entries.set(key, { response: value, threadId, bytes });
+      totalBytes += bytes;
+      for (const [oldestKey, oldest] of entries) {
+        if (entries.size <= maxEntries && totalBytes <= maxBytes) {
+          break;
         }
+        remove(oldestKey, oldest);
       }
       return value;
     },
     invalidateThread(threadId) {
       for (const [key, entry] of entries) {
         if (entry.threadId === threadId) {
-          entries.delete(key);
+          remove(key, entry);
         }
       }
     },
     get size() {
       return entries.size;
+    },
+    get bytes() {
+      return totalBytes;
     },
   };
 }
