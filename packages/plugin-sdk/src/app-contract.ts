@@ -3314,7 +3314,12 @@ export interface NewThreadComposerProps {
   /**
    * Seeds the project picker. The user can change it, including choosing
    * "Don't work in a project"; see {@link NewThreadRequest.projectId} for the
-   * submitted projectless shape.
+   * submitted projectless shape. Changing the project through the picker
+   * preserves the current provider, model, reasoning level and service tier
+   * in that composer. The environment and permission limits follow the new
+   * project. An unavailable provider or model stays selected and blocks
+   * submission until the user chooses an available one. Changing seed props
+   * still re-seeds all selections as described by {@link defaultProviderId}.
    */
   defaultProjectId?: string;
   /**

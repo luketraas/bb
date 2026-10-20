@@ -176,6 +176,7 @@ function renderPicker({
   alternateProviderModels,
   providerRouting,
   selectedProviderId = "codex",
+  hasMultipleProviders = true,
   modelIsLoading = false,
   modelLoadError = null,
   compact = false,
@@ -202,6 +203,7 @@ function renderPicker({
   alternateProviderModels?: AvailableModel[];
   providerRouting?: SystemProvidersQuery;
   selectedProviderId?: string;
+  hasMultipleProviders?: boolean;
   modelIsLoading?: boolean;
   modelLoadError?: SystemExecutionOptionsModelLoadError | null;
   compact?: boolean;
@@ -237,7 +239,7 @@ function renderPicker({
         providerRouting={providerRouting}
         selectedProviderId={selectedProviderId}
         onSelectedProviderChange={onSelectedProviderChange ?? undefined}
-        hasMultipleProviders
+        hasMultipleProviders={hasMultipleProviders}
         modelValue={modelValue}
         modelOptions={modelOptions}
         moreModelOptions={moreModelOptions}
@@ -743,6 +745,24 @@ describe("ModelReasoningPicker", () => {
     expect(
       (await screen.findByRole("listbox", { name: "Models" })).className,
     ).not.toContain("max-h-");
+  });
+
+  it("offers the only available provider when the selected provider is unavailable", async () => {
+    const { onSelectedProviderChange, onModelChange } = renderPicker({
+      pickerProviderOptions: providerOptions.filter(
+        (provider) => provider.value === "claude-code",
+      ),
+      hasMultipleProviders: false,
+      modelOptions: [],
+      modelValue: "gpt-5.5",
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Provider, model and reasoning" }),
+    );
+    fireEvent.click(screen.getByTitle("Claude Code"));
+    expect(onSelectedProviderChange).toHaveBeenCalledWith("claude-code");
+    fireEvent.click(await screen.findByText("Opus 4.7"));
+    expect(onModelChange).toHaveBeenCalledWith("claude-opus-4-7");
   });
 
   it("commits a provider tab immediately and keeps its models selectable", async () => {

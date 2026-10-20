@@ -297,9 +297,9 @@ export function ModelReasoningPicker({
   const selectedModelLoadFailed =
     modelLoadFailed || selectedModelLoadErrorMatches;
   const canSwitchProviders =
-    hasMultipleProviders &&
+    (hasMultipleProviders || selectedProvider === undefined) &&
     onSelectedProviderChange !== undefined &&
-    providerOptions.length > 1;
+    providerOptions.some((provider) => provider.value !== selectedProviderId);
   const queryClient = useQueryClient();
   const prefetchRoutingEnvironmentId = providerRouting?.environmentId;
   const prefetchRoutingHostId = providerRouting?.hostId;
@@ -452,9 +452,10 @@ export function ModelReasoningPicker({
   const isShowingModelError =
     !activeModelIsLoading && !hasActiveModelOptions && activeModelLoadFailed;
   const showProviderTabs =
-    (handoffMode || canSwitchProviders) &&
-    providerOptions.length > 1 &&
-    (!isShowingModelError || activeModelErrorIsProviderSpecific);
+    ((handoffMode && providerOptions.length > 1) || canSwitchProviders) &&
+    (!isShowingModelError ||
+      activeModelErrorIsProviderSpecific ||
+      selectedProvider === undefined);
 
   const activeBrandPrefix = activeProvider?.brandPrefix;
   const filteredModelOptions = useMemo(() => {

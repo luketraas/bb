@@ -645,8 +645,7 @@ export function NewThreadComposer({
   const { providers: machineProviders } = useSystemMachineProviders();
   const pluginList = usePluginList({ enabled: true });
 
-  const seedSignature = JSON.stringify([
-    projectId,
+  const selectionSeedSignature = JSON.stringify([
     resetKey ?? null,
     seed?.providerId ?? null,
     seed?.model ?? null,
@@ -655,6 +654,7 @@ export function NewThreadComposer({
     seed?.permissionMode ?? null,
     seed?.environment ?? null,
   ]);
+  const seedSignature = JSON.stringify([projectId, selectionSeedSignature]);
   const environmentSeed = useMemo(
     () =>
       seed?.environment === undefined
@@ -868,7 +868,8 @@ export function NewThreadComposer({
     scope: selectionScope,
     preferenceProjectId: projectId,
     catalogProjectId: isProjectless ? undefined : projectId,
-    resetKey: `${projectId}\0${seedSignature}`,
+    resetKey: selectionSeedSignature,
+    unavailableSelectionPolicy: "preserve",
     resolveProviderRouting,
     initialProviderId: seed?.providerId ?? projectDefaults?.providerId,
     preferReadyProviderWhenUnset:
@@ -899,6 +900,7 @@ export function NewThreadComposer({
     reasoningLevel,
     reasoningOptions,
     selectedModel,
+    selectionUnavailableReason,
     selectedProviderComposerActions,
     selectedProviderDisplayName,
     selectedProviderId,
@@ -1466,6 +1468,12 @@ export function NewThreadComposer({
       ) {
         return "refused";
       }
+      setProviderModelReasoning({
+        providerId: selectedProviderId,
+        model: selectedThreadModel,
+        reasoningLevel,
+      });
+      setServiceTier(serviceTier);
       const attachmentPaths = getProjectStoredPromptAttachmentPaths(
         promptDraft.getCurrent().attachments,
       );
@@ -1499,7 +1507,18 @@ export function NewThreadComposer({
         setIsCopyingAttachments(false);
       }
     },
-    [onProjectChange, projectId, promptDraft, snapshotDraftBeforeOptionChange],
+    [
+      onProjectChange,
+      projectId,
+      promptDraft,
+      reasoningLevel,
+      selectedProviderId,
+      selectedThreadModel,
+      serviceTier,
+      setProviderModelReasoning,
+      setServiceTier,
+      snapshotDraftBeforeOptionChange,
+    ],
   );
   const handleProjectChange = useCallback(
     async (nextProjectId: string | null) => {
@@ -1624,24 +1643,26 @@ export function NewThreadComposer({
     : (selectedEnvironment ??
       (selectionScope === "new-thread" ? seed?.environment : undefined) ??
       null);
-  const submissionReadinessReason = resolveNewThreadSubmitDisabledReason({
-    environmentProviderInputsBlocker:
-      machineProviderInputs.blockedReason ?? environmentProviderInputsBlocker,
-    environmentSetupRequiredReason:
-      environmentSetupRequiredReason ?? machineServerAccessReason,
-    isCopyingAttachments,
-    isLoadingModels,
-    isSubmitting,
-    isUploading,
-    modelLoadError,
-    projectDefaultsStatus: projectDefaultsState.status,
-    projectDefaultsUnavailable,
-    promptInputEmpty: false,
-    providerDisplayName: selectedProviderDisplayName,
-    selectedProviderId,
-    selectedThreadModel,
-    submissionEnvironmentUnavailable: submissionEnvironment === null,
-  });
+  const submissionReadinessReason =
+    selectionUnavailableReason ??
+    resolveNewThreadSubmitDisabledReason({
+      environmentProviderInputsBlocker:
+        machineProviderInputs.blockedReason ?? environmentProviderInputsBlocker,
+      environmentSetupRequiredReason:
+        environmentSetupRequiredReason ?? machineServerAccessReason,
+      isCopyingAttachments,
+      isLoadingModels,
+      isSubmitting,
+      isUploading,
+      modelLoadError,
+      projectDefaultsStatus: projectDefaultsState.status,
+      projectDefaultsUnavailable,
+      promptInputEmpty: false,
+      providerDisplayName: selectedProviderDisplayName,
+      selectedProviderId,
+      selectedThreadModel,
+      submissionEnvironmentUnavailable: submissionEnvironment === null,
+    });
   const submitDisabledReason =
     submissionReadinessReason ??
     (promptInputEmpty ? "Enter a prompt or attach a file." : null);

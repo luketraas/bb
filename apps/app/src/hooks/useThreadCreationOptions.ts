@@ -143,6 +143,7 @@ interface UseThreadCreationOptionsResult<TExecutionInputSources> {
   modelLoadError: SystemExecutionOptionsModelLoadError | null;
   modelCatalogIsVerified: boolean;
   modelCatalogIsSettled: boolean;
+  selectionUnavailableReason: string | null;
   reasoningOptions: PickerOption<ReasoningLevel>[];
   declaredSessionOptions: ThreadSessionOption[];
   sessionOptionSelections: SessionOptionSelections;
@@ -245,6 +246,7 @@ export function useThreadCreationOptions(
     resolveProviderRouting,
     resetKey,
     scope = "new-thread",
+    unavailableSelectionPolicy = "fallback",
     sessionOptionSelections: sessionOptionSelectionsOverride,
   } = options ?? {};
   const { setValue: setStoredProviderId, value: storedProviderId } =
@@ -284,6 +286,8 @@ export function useThreadCreationOptions(
   const threadResetKeyRef = useRef<string | number | null | undefined>(
     resetKey,
   );
+  const preferenceProjectIdRef = useRef(preferenceProjectId);
+  const projectChanged = preferenceProjectIdRef.current !== preferenceProjectId;
   const usesLocalThreadSelections = scope !== "new-thread";
   const usesStoredCreateSelections = scope === "new-thread";
   const nextThreadSelections = useMemo(
@@ -305,6 +309,20 @@ export function useThreadCreationOptions(
       initialServiceTier,
     ],
   );
+  const touchedThreadFields = touchedThreadFieldsRef.current;
+  const renderedTouchedFields = useMemo(
+    () =>
+      usesLocalThreadSelections && projectChanged
+        ? new Set(
+            [...touchedThreadFields].filter(
+              (field) =>
+                field !== "environmentSelectionValue" &&
+                field !== "permissionMode",
+            ),
+          )
+        : touchedThreadFields,
+    [projectChanged, touchedThreadFields, usesLocalThreadSelections],
+  );
   const renderedThreadSelections = useMemo(() => {
     if (!usesLocalThreadSelections) {
       return nextThreadSelections;
@@ -315,9 +333,10 @@ export function useThreadCreationOptions(
     return syncUntouchedThreadPromptSelections({
       currentSelections: threadSelections,
       nextSelections: nextThreadSelections,
-      touchedFields: touchedThreadFieldsRef.current,
+      touchedFields: renderedTouchedFields,
     });
   }, [
+    renderedTouchedFields,
     nextThreadSelections,
     resetKey,
     threadSelections,
@@ -463,12 +482,13 @@ export function useThreadCreationOptions(
   const effectiveProviderId = useMemo(() => {
     if (
       rawSelectedProviderId &&
-      providers.some((provider) => provider.id === rawSelectedProviderId)
+      (unavailableSelectionPolicy === "preserve" ||
+        providers.some((provider) => provider.id === rawSelectedProviderId))
     ) {
       return rawSelectedProviderId;
     }
     return providers[0]?.id ?? "";
-  }, [providers, rawSelectedProviderId]);
+  }, [providers, rawSelectedProviderId, unavailableSelectionPolicy]);
 
   const { setValue: setStoredSelectedModel, value: storedSelectedModel } =
     usePromptBoxModelPreference(effectiveProviderId);
@@ -632,6 +652,7 @@ export function useThreadCreationOptions(
         sessionOptionSelections: requestedSessionOptionSelections,
         provider: selectedProviderInfo,
         catalogIsVerified: modelCatalogIsVerified,
+        unavailableSelectionPolicy,
         formatModelLabel,
       }),
     [
@@ -642,8 +663,17 @@ export function useThreadCreationOptions(
       rawSelectedModel,
       requestedSessionOptionSelections,
       selectedProviderInfo,
+      unavailableSelectionPolicy,
     ],
   );
+  const selectionUnavailableReason =
+    unavailableSelectionPolicy !== "preserve" || !modelCatalogIsVerified
+      ? null
+      : effectiveProviderId && selectedProviderInfo === undefined
+        ? "The selected provider is unavailable in this environment. Choose a provider to continue."
+        : selectedModel && activeModel === undefined
+          ? "The selected model is unavailable in this environment. Choose a model to continue."
+          : null;
   const setSessionOption = useCallback(
     (optionId: string, value: SessionOptionValue) => {
       if (usesStoredCreateSelections) {
@@ -677,6 +707,13 @@ export function useThreadCreationOptions(
     [activeModel, allowFastServiceTier, selectedProviderInfo],
   );
   const serviceTier = useMemo(() => {
+    if (
+      unavailableSelectionPolicy === "preserve" &&
+      allowFastServiceTier &&
+      (!modelCatalogIsVerified || selectedProviderInfo === undefined)
+    ) {
+      return rawServiceTier;
+    }
     if (!activeProviderCapabilities?.supportsServiceTier) {
       return undefined;
     }
@@ -688,8 +725,12 @@ export function useThreadCreationOptions(
       : reconcileServiceTier(rawServiceTier, serviceTierOptions);
   }, [
     activeProviderCapabilities?.supportsServiceTier,
+    allowFastServiceTier,
+    modelCatalogIsVerified,
     rawServiceTier,
+    selectedProviderInfo,
     serviceTierOptions,
+    unavailableSelectionPolicy,
   ]);
 
   const permissionMode = resolvePermissionModeSelection({
@@ -731,7 +772,7 @@ export function useThreadCreationOptions(
         },
         touchedFields: touchedFieldsPendingReset
           ? new Set<ThreadPromptField>()
-          : touchedThreadFieldsRef.current,
+          : renderedTouchedFields,
       }),
     [
       effectiveProviderId,
@@ -749,11 +790,13 @@ export function useThreadCreationOptions(
       storedSelectedModel,
       storedServiceTier,
       touchedFieldsPendingReset,
+      renderedTouchedFields,
     ],
   );
 
   useLayoutEffect(() => {
     if (!usesLocalThreadSelections) return;
+    preferenceProjectIdRef.current = preferenceProjectId;
     if (threadResetKeyRef.current !== resetKey) {
       threadResetKeyRef.current = resetKey;
       touchedThreadFieldsRef.current = new Set();
@@ -763,6 +806,9 @@ export function useThreadCreationOptions(
       setThreadSelections(nextThreadSelections);
       return;
     }
+    if (projectChanged) {
+      touchedThreadFieldsRef.current = renderedTouchedFields;
+    }
     setThreadSelections((currentSelections) =>
       syncUntouchedThreadPromptSelections({
         currentSelections,
@@ -770,7 +816,14 @@ export function useThreadCreationOptions(
         touchedFields: touchedThreadFieldsRef.current,
       }),
     );
-  }, [nextThreadSelections, resetKey, usesLocalThreadSelections]);
+  }, [
+    nextThreadSelections,
+    preferenceProjectId,
+    projectChanged,
+    renderedTouchedFields,
+    resetKey,
+    usesLocalThreadSelections,
+  ]);
 
   const setSelectedProviderId = useCallback(
     (value: string) => {
@@ -1073,6 +1126,7 @@ export function useThreadCreationOptions(
     modelLoadError,
     modelCatalogIsVerified,
     modelCatalogIsSettled,
+    selectionUnavailableReason,
     reasoningOptions,
     declaredSessionOptions,
     sessionOptionSelections,

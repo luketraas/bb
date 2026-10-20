@@ -24,6 +24,7 @@ interface ResolveModelCatalogSelectionArgs {
   sessionOptionSelections?: SessionOptionSelections;
   provider: ReasoningLabelSource | undefined;
   catalogIsVerified: boolean;
+  unavailableSelectionPolicy?: "fallback" | "preserve";
   formatModelLabel: (displayName: string) => string;
 }
 
@@ -85,6 +86,7 @@ export function resolveModelCatalogSelection({
   sessionOptionSelections: requestedSessionOptionSelections,
   provider,
   catalogIsVerified,
+  unavailableSelectionPolicy = "fallback",
   formatModelLabel,
 }: ResolveModelCatalogSelectionArgs): ResolvedModelCatalogSelection {
   const fullCatalog = [...models, ...selectedOnlyModels];
@@ -118,7 +120,10 @@ export function resolveModelCatalogSelection({
   }
 
   const catalogSelectedModel = (() => {
-    if (!catalogIsVerified && selectedModelSelection) {
+    if (
+      (!catalogIsVerified || unavailableSelectionPolicy === "preserve") &&
+      selectedModelSelection
+    ) {
       return selectedModelSelection;
     }
     if (availableModels.length === 0) {
@@ -157,8 +162,9 @@ export function resolveModelCatalogSelection({
 
   const activeModel =
     availableModels.find((model) => model.model === selectedModel) ??
-    availableModels.find((model) => model.isDefault) ??
-    availableModels[0];
+    (unavailableSelectionPolicy === "fallback"
+      ? (availableModels.find((model) => model.isDefault) ?? availableModels[0])
+      : undefined);
 
   const seenReasoningLevels = new Set<ReasoningLevel>();
   const reasoningEfforts = (

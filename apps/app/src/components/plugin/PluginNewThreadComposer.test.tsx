@@ -100,6 +100,10 @@ const mocks = vi.hoisted(() => ({
   serverAccessReady: true,
   machineProviders: [] as SystemMachineProvider[],
   modelsLoading: false,
+  unavailableModel: false,
+  unavailableProvider: false,
+  supportsServiceTier: false,
+  executionOptionsRequests: [] as unknown[],
   permissionCeiling: undefined as "accept-edits" | "auto" | "full" | undefined,
   modelSessionOptions: undefined as ThreadSessionOption[] | undefined,
 }));
@@ -293,8 +297,9 @@ vi.mock("@/hooks/queries/system-queries", () => ({
       },
     },
   }),
-  useSystemExecutionOptions: () =>
-    mocks.modelsLoading
+  useSystemExecutionOptions: (options: unknown) => {
+    mocks.executionOptionsRequests.push(options);
+    return mocks.modelsLoading
       ? {
           data: undefined,
           isLoading: true,
@@ -310,9 +315,10 @@ vi.mock("@/hooks/queries/system-queries", () => ({
                 displayName: "Codex",
                 logoUrl: null,
                 capabilities: {
-                  supportsServiceTier: false,
+                  supportsServiceTier: mocks.supportsServiceTier,
                   permissionModes: ["auto", "accept-edits", "full"],
                 },
+                serviceTiers: [{ id: "fast", label: "Fast" }],
                 composerActions: [],
               },
               {
@@ -320,12 +326,16 @@ vi.mock("@/hooks/queries/system-queries", () => ({
                 displayName: "Claude Code",
                 logoUrl: null,
                 capabilities: {
-                  supportsServiceTier: false,
+                  supportsServiceTier: mocks.supportsServiceTier,
                   permissionModes: ["auto", "accept-edits", "full"],
                 },
+                serviceTiers: [{ id: "fast", label: "Fast" }],
                 composerActions: [],
               },
-            ],
+            ].filter(
+              (provider) =>
+                !mocks.unavailableProvider || provider.id !== "codex",
+            ),
             models: [
               {
                 model: "gpt-5.6",
@@ -348,14 +358,18 @@ vi.mock("@/hooks/queries/system-queries", () => ({
                   { reasoningEffort: "high" },
                 ],
               },
-            ],
+            ].filter(
+              (model) =>
+                !mocks.unavailableModel || model.model !== "gpt-5.6-sol",
+            ),
             selectedOnlyModels: [],
             modelLoadError: null,
           },
           isLoading: false,
           isError: false,
           isPlaceholderData: false,
-        },
+        };
+  },
 }));
 
 vi.mock("@/hooks/queries/thread-queries", () => ({
@@ -702,6 +716,10 @@ describe("PluginNewThreadComposer seeding", () => {
     mocks.serverAccessReady = true;
     mocks.machineProviders = [];
     mocks.modelsLoading = false;
+    mocks.unavailableModel = false;
+    mocks.unavailableProvider = false;
+    mocks.supportsServiceTier = false;
+    mocks.executionOptionsRequests = [];
     mocks.permissionCeiling = undefined;
     mocks.environmentProviders = [
       CHECKOUT_PROVIDER,
@@ -1265,6 +1283,334 @@ describe("PluginNewThreadComposer seeding", () => {
         inputs: null,
       },
     });
+  });
+
+  function ProjectSwitchComposer({
+    surface,
+    onSubmit,
+  }: {
+    surface: "main" | "plugin";
+    onSubmit: (request: NewThreadRequest) => void;
+  }) {
+    const [projectId, setProjectId] = useState("proj_1");
+    return (
+      <Provider>
+        <MemoryRouter>
+          {surface === "plugin" ? (
+            <PluginNewThreadComposer
+              defaultProjectId="proj_1"
+              draftKey="project-selection-contract"
+              onSubmit={onSubmit}
+            />
+          ) : (
+            <NewThreadComposer
+              projectId={projectId}
+              onProjectChange={setProjectId}
+              draftStorage={{ kind: "new-thread" }}
+              selectionScope="new-thread"
+              onSubmit={onSubmit}
+            >
+              {(composer) =>
+                composer.renderPromptBox({
+                  allowNoProject: true,
+                  mentionMenuPlacement: "bottom",
+                })
+              }
+            </NewThreadComposer>
+          )}
+        </MemoryRouter>
+      </Provider>
+    );
+  }
+
+  describe.each(["main", "plugin"] as const)(
+    "%s project selection contract",
+    (surface) => {
+      it.each(["model only", "provider and model"])(
+        "preserves %s, reasoning and speed across repeated project changes",
+        async (choice) => {
+          mocks.supportsServiceTier = true;
+          mocks.extraProjects = [
+            makeProjectWithThreadsResponse({
+              ...OTHER_PROJECT,
+              id: "proj_different",
+              defaultExecutionOptions: {
+                ...PROJECT.defaultExecutionOptions!,
+                providerId: choice === "model only" ? "claude-code" : "codex",
+              },
+            }),
+          ];
+          const submitted: NewThreadRequest[] = [];
+          render(
+            <ProjectSwitchComposer
+              surface={surface}
+              onSubmit={(request) => submitted.push(request)}
+            />,
+          );
+          await act(async () => {
+            if (choice === "provider and model") {
+              latestPromptBoxProps().execution.provider.onChange("claude-code");
+            }
+          });
+          await act(async () => {
+            latestPromptBoxProps().execution.model.onChange("gpt-5.6-sol");
+            latestPromptBoxProps().execution.reasoning.onChange("high");
+            latestPromptBoxProps().execution.serviceTier.onChange("fast");
+            latestPromptBoxProps().onChange("keep this draft", []);
+          });
+          const providerId = choice === "model only" ? "codex" : "claude-code";
+          for (const projectId of ["proj_different", "proj_1", "proj_2"]) {
+            await act(async () => {
+              await latestPromptBoxProps().project.onChange(projectId);
+            });
+            expect(latestPromptBoxProps().execution).toMatchObject({
+              provider: { selectedId: providerId },
+              model: { selected: "gpt-5.6-sol" },
+              reasoning: { value: "high" },
+              serviceTier: { value: "fast" },
+            });
+            expect(latestPromptBoxProps().project.value).toBe(projectId);
+            expect(latestPromptBoxProps().value).toBe("keep this draft");
+          }
+          await submit();
+          expect(submitted).toHaveLength(1);
+          expect(submitted[0]).toMatchObject({
+            projectId: "proj_2",
+            providerId,
+            model: "gpt-5.6-sol",
+            reasoningLevel: "high",
+            serviceTier: "fast",
+            executionInputSources: {
+              providerId: "explicit",
+              model: "explicit",
+              reasoningLevel: "explicit",
+              serviceTier: "explicit",
+            },
+            environment: {
+              type: "provider",
+              environmentProviderId: "project-checkout",
+            },
+          });
+        },
+      );
+
+      it("keeps the choice through delayed project defaults and catalogs while applying the destination permissions", async () => {
+        mocks.supportsServiceTier = true;
+        const delayedProject = makeProjectWithThreadsResponse({
+          ...OTHER_PROJECT,
+          id: "proj_delayed",
+          defaultExecutionOptions: null,
+        });
+        mocks.extraProjects = [delayedProject];
+        const submitted: NewThreadRequest[] = [];
+        const onSubmit = (request: NewThreadRequest) => {
+          submitted.push(request);
+        };
+        const view = render(
+          <ProjectSwitchComposer surface={surface} onSubmit={onSubmit} />,
+        );
+        await act(async () => {
+          latestPromptBoxProps().execution.model.onChange("gpt-5.6-sol");
+          latestPromptBoxProps().execution.reasoning.onChange("high");
+          latestPromptBoxProps().execution.serviceTier.onChange("fast");
+          latestPromptBoxProps().modeConfig.permission.onChange("full");
+          latestPromptBoxProps().onChange("keep this draft", []);
+        });
+        mocks.modelsLoading = true;
+        await act(async () => {
+          await latestPromptBoxProps().project.onChange("proj_delayed");
+        });
+        expect(latestPromptBoxProps().execution).toMatchObject({
+          provider: { selectedId: "codex" },
+          model: { selected: "gpt-5.6-sol" },
+          reasoning: { value: "high" },
+          serviceTier: { value: "fast" },
+        });
+        await act(async () => {
+          await latestPromptBoxProps().project.onChange("proj_2");
+        });
+        mocks.modelsLoading = false;
+        mocks.permissionCeiling = "accept-edits";
+        delayedProject.defaultExecutionOptions = {
+          ...PROJECT.defaultExecutionOptions!,
+          providerId: "claude-code",
+          reasoningLevel: "low",
+          permissionMode: "full",
+        };
+        view.rerender(
+          <ProjectSwitchComposer surface={surface} onSubmit={onSubmit} />,
+        );
+        await act(async () => {
+          await latestPromptBoxProps().project.onChange("proj_delayed");
+        });
+        expect(latestPromptBoxProps().execution).toMatchObject({
+          provider: { selectedId: "codex" },
+          model: { selected: "gpt-5.6-sol" },
+          reasoning: { value: "high" },
+          serviceTier: { value: "fast" },
+        });
+        expect(latestPromptBoxProps().modeConfig.permission.value).toBe(
+          "accept-edits",
+        );
+        await submit();
+        expect(submitted).toHaveLength(1);
+        expect(submitted[0]).toMatchObject({
+          projectId: "proj_delayed",
+          model: "gpt-5.6-sol",
+          permissionMode: "accept-edits",
+        });
+      });
+
+      it("routes the retained provider catalog and submission to the destination machine", async () => {
+        const destination = makeProjectWithThreadsResponse({
+          ...OTHER_PROJECT,
+          id: "proj_remote",
+          sources: [
+            {
+              ...OTHER_PROJECT.sources[0],
+              projectId: "proj_remote",
+              hostId: "host_2",
+              path: "/remote-project",
+            },
+          ],
+        });
+        mocks.extraProjects = [destination];
+        const submitted: NewThreadRequest[] = [];
+        render(
+          <ProjectSwitchComposer
+            surface={surface}
+            onSubmit={(request) => {
+              submitted.push(request);
+            }}
+          />,
+        );
+        await act(async () => {
+          latestPromptBoxProps().execution.model.onChange("gpt-5.6-sol");
+          latestPromptBoxProps().execution.reasoning.onChange("high");
+          latestPromptBoxProps().onChange("keep this draft", []);
+        });
+        await act(async () => {
+          await latestPromptBoxProps().project.onChange("proj_remote");
+        });
+        expect(latestPromptBoxProps().modeConfig.environment.sources).toEqual(
+          destination.sources,
+        );
+        await act(async () => {
+          latestPromptBoxProps().modeConfig.environment.onSelectProvider(
+            CHECKOUT_PROVIDER,
+            "host_2",
+          );
+        });
+        expect(mocks.executionOptionsRequests.at(-1)).toMatchObject({
+          hostId: "host_2",
+          providerId: "codex",
+        });
+        expect(latestPromptBoxProps().execution.model.selected).toBe(
+          "gpt-5.6-sol",
+        );
+        await submit();
+        expect(submitted).toHaveLength(1);
+        expect(submitted[0]).toMatchObject({
+          projectId: "proj_remote",
+          providerId: "codex",
+          model: "gpt-5.6-sol",
+          reasoningLevel: "high",
+          environment: {
+            type: "provider",
+            environmentProviderId: "project-checkout",
+            machine: { type: "existing", hostId: "host_2" },
+          },
+        });
+      });
+
+      it.each(["model", "provider"] as const)(
+        "keeps an unavailable %s selected and blocks submission until a choice is made",
+        async (unavailable) => {
+          const onSubmit = vi.fn();
+          const element = (
+            <ProjectSwitchComposer surface={surface} onSubmit={onSubmit} />
+          );
+          const view = render(element);
+          await act(async () => {
+            latestPromptBoxProps().execution.model.onChange("gpt-5.6-sol");
+            latestPromptBoxProps().execution.reasoning.onChange("high");
+            latestPromptBoxProps().onChange("keep this draft", []);
+          });
+          mocks.modelsLoading = true;
+          await act(async () => {
+            await latestPromptBoxProps().project.onChange("proj_2");
+          });
+          expect(latestPromptBoxProps().execution.provider.selectedId).toBe(
+            "codex",
+          );
+          expect(latestPromptBoxProps().execution.model.selected).toBe(
+            "gpt-5.6-sol",
+          );
+          expect(latestPromptBoxProps().execution.reasoning.value).toBe("high");
+          mocks.modelsLoading = false;
+          mocks.unavailableModel = unavailable === "model";
+          mocks.unavailableProvider = unavailable === "provider";
+          view.rerender(
+            <ProjectSwitchComposer surface={surface} onSubmit={onSubmit} />,
+          );
+          expect(latestPromptBoxProps().execution.provider.selectedId).toBe(
+            "codex",
+          );
+          expect(latestPromptBoxProps().execution.model.selected).toBe(
+            "gpt-5.6-sol",
+          );
+          expect(latestPromptBoxProps().disabledReason).toContain(
+            "unavailable",
+          );
+          await submit();
+          expect(onSubmit).not.toHaveBeenCalled();
+          await act(async () => {
+            if (unavailable === "provider")
+              latestPromptBoxProps().execution.provider.onChange("claude-code");
+          });
+          await act(async () => {
+            latestPromptBoxProps().execution.model.onChange("gpt-5.6");
+          });
+          await submit();
+          expect(onSubmit).toHaveBeenCalledOnce();
+        },
+      );
+    },
+  );
+
+  it("keeps selections independent in two plugin panes", async () => {
+    mocks.extraProjects = [
+      makeProjectWithThreadsResponse({ ...PROJECT, id: "proj_third" }),
+    ];
+    render(
+      <MemoryRouter>
+        <PluginNewThreadComposer
+          defaultProjectId="proj_1"
+          draftKey="pane-one"
+          onSubmit={() => undefined}
+        />
+        <PluginNewThreadComposer
+          defaultProjectId="proj_2"
+          draftKey="pane-two"
+          onSubmit={() => undefined}
+        />
+      </MemoryRouter>,
+    );
+    const pane = (projectId: string) =>
+      mocks.promptBoxProps
+        .filter((props) => props.project.value === projectId)
+        .at(-1)!;
+    await act(async () => {
+      pane("proj_1").execution.model.onChange("gpt-5.6-sol");
+      pane("proj_1").execution.reasoning.onChange("high");
+    });
+    await act(async () => {
+      await pane("proj_1").project.onChange("proj_third");
+    });
+    expect(pane("proj_third").execution.model.selected).toBe("gpt-5.6-sol");
+    expect(pane("proj_third").execution.reasoning.value).toBe("high");
+    expect(pane("proj_2").execution.model.selected).toBe("gpt-5.6");
+    expect(pane("proj_2").execution.reasoning.value).toBe("medium");
   });
 
   it("re-seeds every selection when the seed props change, even after a user pick", async () => {
@@ -3133,7 +3479,7 @@ describe("NewThreadComposer setSelection", () => {
       currentHost().setSelection!({ permissionMode: "full" }),
       2_000,
     );
-    expect(bounded.providerId).toBeUndefined();
+    expect(bounded.providerId).toBe("codex");
     expect(bounded.permissionMode).toBe("full");
   });
 
